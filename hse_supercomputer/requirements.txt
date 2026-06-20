@@ -1,0 +1,32 @@
+# HSE Supercomputer requirements
+# Compatible with old GCC and Python 3.12 from PyTorch module
+
+# Core dependencies (compatible versions)
+numpy<2.0
+torch  # From PyTorch module
+tqdm
+blobfile
+
+# Transformers dependencies
+filelock
+pyyaml>=5.1
+regex!=2019.12.17
+sacremoses
+tokenizers>=0.10.1,!=0.11.3,<0.20.0
+sentencepiece
+
+# HuggingFace
+huggingface-hub>=0.1.0,<1.0
+datasets>=2.0.0,<3.0.0
+
+# NLP
+spacy>=3.5.0,<4.0.0
+
+# MPI for multi-GPU
+mpi4py
+
+# WandB (older version, no Go build issues)
+wandb<0.18.0
+
+# Avoid problematic packages that need new GCC
+pyarrow<18.0.0  # Older version doesn't need new numpy

@@ -1,0 +1,13 @@
+.cursor/
+.DS_Store
+predictability/
+presentation/
+trained_models/
+check_special_token_neighbors/
+vast.ai/
+datasets/
+improved-diffusion/generation_outputs/
+hse_supercomputer/.venv*/
+.hf_cache/
+__pycache__/
+*.npz

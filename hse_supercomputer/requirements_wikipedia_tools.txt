@@ -1,0 +1,16 @@
+# Tools venv for prepare_wikipedia_corpus.py and HF dataset downloads.
+# Old pip picks pyarrow sdists (needs Cython + build chain). Use upgraded pip + wheels only:
+#
+#   module purge && module load Python/PyTorch_GPU_v2.4 openmpi
+#   python3 -m venv hse_supercomputer/.venv_wikipedia
+#   source hse_supercomputer/.venv_wikipedia/bin/activate
+#   pip install -U pip setuptools wheel
+#   pip install --only-binary=:all: -r hse_supercomputer/requirements_wikipedia_tools.txt
+#
+# If --only-binary fails on your platform, drop that flag after pip is current (>=21).
+
+numpy>=1.24,<2
+pyarrow>=14,<18
+nltk>=3.8
+tqdm
+huggingface_hub>=0.20
