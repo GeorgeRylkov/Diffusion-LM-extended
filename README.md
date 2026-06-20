@@ -1,3 +1,46 @@
+# Training an Encoder for Latent Space Representation in Continuous Text Diffusion Models
+
+Master's thesis, HSE University, 2025–2026.
+
+This repository extends [Diffusion-LM](https://arxiv.org/pdf/2205.14217.pdf)
+with experiments on pretrained embedding spaces and larger corpora.
+
+## Extensions
+
+**Embedding modes.** Beyond the original random/GloVe embeddings, we add:
+
+- BERT-tiny 128d — frozen pretrained and jointly learned (e2e) variants
+- BERT-base 768d — frozen and e2e (limited by noise schedule mismatch at high dimension)
+- GPT-2 PCA 128d — GPT-2 `wte` embeddings reduced via PCA, frozen during training
+- fastText 128d — subword-aware embeddings, handles out-of-vocabulary words
+
+All embedding variants are compared under matched tokenizer and dimension,
+pairing a frozen pretrained model with a jointly trained one.
+
+**Wikipedia corpus.** Training and evaluation on ~27M passages extracted from
+the ROOTS English Wikipedia dataset, in addition to the original E2E and ROCStories corpora.
+
+**Latent space analysis.** Geometric comparison of frozen vs. e2e embedding spaces:
+- Local Neighborhood Similarity (LNS, Boggust et al. 2022) — per-token Jaccard overlap of k-NN sets
+- Hubness (Radovanovic et al. 2010) — skewness of the neighbour-count distribution
+- Isotropy — mean pairwise cosine similarity, PCA effective rank
+- PIP distance — Frobenius norm of the difference of Gram matrices
+
+**Infrastructure.** Training scripts for the HSE supercomputer (SLURM + 3× V100).
+
+## Main Finding
+
+Among all tested configurations, **frozen pretrained BERT-tiny embeddings achieve
+the best generation quality** (ROCStories: PPL 3.04, MAUVE 0.503), outperforming
+their jointly learned counterpart (PPL 3.10, MAUVE 0.194). This holds on Wikipedia as well.
+The result contradicts prior work reporting an advantage for jointly learned embeddings.
+
+Geometry analysis shows that jointly learned spaces develop higher hubness and
+a more uniform PCA spectrum, but their local neighborhoods diverge substantially
+from the pretrained structure — which may explain the quality gap.
+
+---
+
 # Diffusion-LM Improves Controllable Text Generation
 
 https://arxiv.org/pdf/2205.14217.pdf 
