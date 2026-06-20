@@ -47,19 +47,26 @@ def main():
         # tokenize
         # load tokenizer.
         tokenizer = load_tokenizer(args.modality, args.experiment, os.path.split(args.model_path)[0])
-        # print(args.modality, tokenizer, args.experiment)
-        reverse_tokenizer = {v:k for k,v in tokenizer.items()}
+        if isinstance(tokenizer, dict):
+            reverse_tokenizer = {v:k for k,v in tokenizer.items()}
+        else:
+            reverse_tokenizer = tokenizer.get_vocab()
 
         agg_loss = []
+        if isinstance(tokenizer, dict):
+            pad_token_id = reverse_tokenizer['PAD']
+        else:
+            pad_token_id = tokenizer.pad_token_id
+
         for x in text_samples:
-            # print(x)
-            tokenized_x = [reverse_tokenizer[s] for s in x]
-            # print(tokenized_x)
+            if isinstance(tokenizer, dict):
+                tokenized_x = [reverse_tokenizer[s] for s in x]
+            else:
+                tokenized_x = tokenizer.encode(' '.join(x), add_special_tokens=False)
             tokenized_x = torch.LongTensor(tokenized_x).cuda()
             labels = tokenized_x.clone()
-            labels[labels==reverse_tokenizer['PAD']] = -100
+            labels[labels == pad_token_id] = -100
             model_output = model(tokenized_x, labels=labels)
-            # print(model_output.loss)
             agg_loss.append(model_output.loss.item())
 
         print(f'\nthe mean loss is {torch.tensor(agg_loss).mean()} for {args.input_text}', )
@@ -136,7 +143,10 @@ def generate(args):
     # print(model)
     # load tokenizer.
     tokenizer = load_tokenizer(args.modality, args.experiment, os.path.split(args.model_path)[0])
-    reverse_tokenizer = {v: k for k, v in tokenizer.items()}
+    if isinstance(tokenizer, dict):
+        reverse_tokenizer = {v: k for k, v in tokenizer.items()}
+    else:
+        reverse_tokenizer = tokenizer.get_vocab()
     print(len(tokenizer))
 
     init_prompt = torch.LongTensor([reverse_tokenizer['START']]).view(1,1).expand(50, -1).to(model.device)
@@ -180,14 +190,12 @@ def generate(args):
 
     agg_loss = []
     for idx, x in enumerate(text_samples):
-        # print(x)
-        tokenized_x = [reverse_tokenizer[s] for s in x]
+        if isinstance(tokenizer, dict):
+            tokenized_x = [reverse_tokenizer[s] for s in x]
+        else:
+            tokenized_x = tokenizer.encode(' '.join(x), add_special_tokens=False)
         tokenized_x = torch.LongTensor(tokenized_x).cuda()
-        # print(tokenized_x)
-        # print(sample_out[idx])
-        # print((tokenized_x == sample_out[idx]).all())
         model_output = model(tokenized_x, labels=tokenized_x)
-        # print(model_output.loss)
         agg_loss.append(model_output.loss.item())
 
     print(f'\nthe mean loss is {torch.tensor(agg_loss).mean()} for {args.input_text}', )

@@ -1,27 +1,24 @@
-from .transformer_utils import BertAttention, trans_nd, layer_norm
-from transformers import AutoConfig
-# from transformers import BertEncoder
-from transformers.models.bert.modeling_bert import BertEncoder
-import torch
 from abc import abstractmethod
 
-import math
-
 import numpy as np
+import torch
 import torch as th
 import torch.nn as nn
-import torch.nn.functional as F
+
+# from transformers import BertEncoder
+from transformers.models.bert.modeling_bert import BertEncoder
+
+from transformers import AutoConfig
 
 from .fp16_util import convert_module_to_f16, convert_module_to_f32
 from .nn import (
     SiLU,
-    conv_nd,
-    linear,
-    avg_pool_nd,
-    zero_module,
-    timestep_embedding,
     checkpoint,
+    linear,
+    timestep_embedding,
+    zero_module,
 )
+from .transformer_utils import layer_norm, trans_nd
 
 
 class TimestepBlock(nn.Module):
@@ -49,7 +46,6 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
             else:
                 x = layer(x)
         return x
-
 
 
 class TransSimpleBlock(TimestepBlock):
@@ -93,7 +89,12 @@ class TransSimpleBlock(TimestepBlock):
         self.in_layers = nn.Sequential(
             layer_norm(channels),
             SiLU(),
-            trans_nd(config, channels, self.out_channels // attention_head_size, attention_head_size),
+            trans_nd(
+                config,
+                channels,
+                self.out_channels // attention_head_size,
+                attention_head_size,
+            ),
         )
         self.emb_layers = nn.Sequential(
             SiLU(),
@@ -107,20 +108,29 @@ class TransSimpleBlock(TimestepBlock):
             SiLU(),
             nn.Dropout(p=dropout),
             zero_module(
-                trans_nd(config, self.out_channels, self.out_channels // attention_head_size, attention_head_size),
+                trans_nd(
+                    config,
+                    self.out_channels,
+                    self.out_channels // attention_head_size,
+                    attention_head_size,
+                ),
             ),
         )
 
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
-
-            self.skip_connection = trans_nd(config, channels, self.out_channels // attention_head_size,
-                                            attention_head_size)
+            self.skip_connection = trans_nd(
+                config,
+                channels,
+                self.out_channels // attention_head_size,
+                attention_head_size,
+            )
         else:
-            self.skip_connection = nn.Sequential(nn.Linear(self.channels, self.out_channels),
-                                                 nn.LayerNorm(self.out_channels, eps=config.layer_norm_eps),
-                                                 )
+            self.skip_connection = nn.Sequential(
+                nn.Linear(self.channels, self.out_channels),
+                nn.LayerNorm(self.out_channels, eps=config.layer_norm_eps),
+            )
 
     def forward(self, x, emb):
         """
@@ -152,9 +162,6 @@ class TransSimpleBlock(TimestepBlock):
             h = h + emb_out
             h = self.out_layers(h)
         return self.skip_connection(x) + h
-
-
-
 
 
 class TransModel(nn.Module):
@@ -203,12 +210,11 @@ class TransModel(nn.Module):
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
         if config is None:
-            config = AutoConfig.from_pretrained('bert-base-uncased')
-            config.position_embedding_type = 'relative_key'
+            config = AutoConfig.from_pretrained("bert-base-uncased")
+            config.position_embedding_type = "relative_key"
             config.max_position_embeddings = 256
 
             # print(self.position_embedding_type, config.max_position_embeddings)
-
 
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -237,7 +243,12 @@ class TransModel(nn.Module):
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    trans_nd(config, in_channels, model_channels // attention_head_size, attention_head_size)
+                    trans_nd(
+                        config,
+                        in_channels,
+                        model_channels // attention_head_size,
+                        attention_head_size,
+                    )
                 )
             ]
         )
@@ -329,8 +340,13 @@ class TransModel(nn.Module):
         self.out = nn.Sequential(
             layer_norm(ch),
             SiLU(),
-            trans_nd(config, model_channels, out_channels // attention_head_size_final, attention_head_size_final),
-        # zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
+            trans_nd(
+                config,
+                model_channels,
+                out_channels // attention_head_size_final,
+                attention_head_size_final,
+            ),
+            # zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
 
         print(self.out, out_channels)
@@ -367,9 +383,9 @@ class TransModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
+        assert (y is not None) == (self.num_classes is not None), (
+            "must specify y if and only if the model is class-conditional"
+        )
 
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
@@ -469,7 +485,7 @@ class TransformerNetModel(nn.Module):
             num_heads_upsample = num_heads
 
         if config is None:
-            config = AutoConfig.from_pretrained('bert-base-uncased')
+            config = AutoConfig.from_pretrained("bert-base-uncased")
 
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -498,7 +514,12 @@ class TransformerNetModel(nn.Module):
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    trans_nd(config, in_channels, model_channels // attention_head_size, attention_head_size)
+                    trans_nd(
+                        config,
+                        in_channels,
+                        model_channels // attention_head_size,
+                        attention_head_size,
+                    )
                 )
             ]
         )
@@ -554,7 +575,7 @@ class TransformerNetModel(nn.Module):
         self.output_blocks = nn.ModuleList([])
         print(input_block_chans)
         for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_res_blocks ):
+            for i in range(num_res_blocks):
                 layers = [
                     TransSimpleBlock(
                         ch + input_block_chans.pop(),
@@ -578,8 +599,14 @@ class TransformerNetModel(nn.Module):
         self.out = nn.Sequential(
             layer_norm(ch),
             SiLU(),
-            zero_module(trans_nd(config, model_channels, out_channels // attention_head_size_final,
-                                            attention_head_size_final)),
+            zero_module(
+                trans_nd(
+                    config,
+                    model_channels,
+                    out_channels // attention_head_size_final,
+                    attention_head_size_final,
+                )
+            ),
         )
 
     def convert_to_fp16(self):
@@ -614,9 +641,9 @@ class TransformerNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
+        assert (y is not None) == (self.num_classes is not None), (
+            "must specify y if and only if the model is class-conditional"
+        )
 
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
@@ -711,12 +738,15 @@ class TransformerNetModel2(nn.Module):
         num_heads_upsample=-1,
         use_scale_shift_norm=False,
         config=None,
-        config_name='bert-base-uncased',
-        training_mode='emb',
+        config_name="bert-base-uncased",
+        training_mode="emb",
         vocab_size=None,
-        experiment_mode='lm',
+        experiment_mode="lm",
         init_pretrained=False,
         logits_mode=1,
+        experiment="random",
+        glove_file_path="predictability/fasttext/fasttext_rocstory_128d.txt",
+        vocab_file=None,
     ):
         super().__init__()
 
@@ -742,8 +772,14 @@ class TransformerNetModel2(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.logits_mode = logits_mode
 
-        if training_mode == 'e2e':
+        if training_mode == "e2e":
             self.word_embedding = nn.Embedding(vocab_size, self.in_channels)
+
+            # Initialize with GloVe if experiment is 'glove'
+            if experiment == "glove":
+                print(f"[e2e mode] Loading GloVe embeddings from: {glove_file_path}")
+                self._load_glove_embeddings(glove_file_path, vocab_size, vocab_file)
+
             if self.logits_mode == 2:
                 # self.lm_head = nn.Linear(self.in_channels, vocab_size, bias=False)
                 self.lm_head = nn.Linear(self.in_channels, vocab_size, bias=True)
@@ -752,22 +788,29 @@ class TransformerNetModel2(nn.Module):
                 self.lm_head = nn.Linear(self.in_channels, vocab_size)
             with th.no_grad():
                 self.lm_head.weight = self.word_embedding.weight
-        elif training_mode == 'e2e-simple':
+        elif training_mode == "e2e-simple":
             self.word_embedding = nn.Embedding(vocab_size, self.in_channels)
+
+            # Initialize with GloVe if experiment is 'glove'
+            if experiment == "glove":
+                print(
+                    f"[e2e-simple mode] Loading GloVe embeddings from: {glove_file_path}"
+                )
+                self._load_glove_embeddings(glove_file_path, vocab_size, vocab_file)
+
             self.lm_head = nn.Linear(self.in_channels, vocab_size)
             with th.no_grad():
                 self.lm_head.weight = self.word_embedding.weight
 
-        if experiment_mode == 'conditional_gen':
+        if experiment_mode == "conditional_gen":
             self.conditional_gen = True
             self.encoder_emb = nn.Embedding(vocab_size, config.hidden_size)
             self.encoder = BertEncoder(config)
-            print(config, 'conditional_gen')
+            print(config, "conditional_gen")
             config.is_decoder = True
             config.add_cross_attention = True
-        elif experiment_mode == 'lm':
+        elif experiment_mode == "lm":
             self.conditional_gen = False
-
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -779,23 +822,30 @@ class TransformerNetModel2(nn.Module):
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
-
         # self.input_up_proj = trans_nd(config, in_channels, model_channels // attention_head_size, attention_head_size)
-        self.input_up_proj = nn.Sequential(nn.Linear(in_channels, config.hidden_size),
-                                              nn.Tanh(), nn.Linear(config.hidden_size, config.hidden_size))
+        self.input_up_proj = nn.Sequential(
+            nn.Linear(in_channels, config.hidden_size),
+            nn.Tanh(),
+            nn.Linear(config.hidden_size, config.hidden_size),
+        )
         if init_pretrained:
             from transformers.models.bert.modeling_bert import BertModel
+
             temp_bert = BertModel.from_pretrained(config_name, config=config)
             del temp_bert.embeddings
             del temp_bert.pooler
             self.input_transformers = temp_bert.encoder
-            print('initializing from pretrained bert.')
+            print("initializing from pretrained bert.")
         else:
             print(config)
             self.input_transformers = BertEncoder(config)
 
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.register_buffer(
+            "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1))
+        )
+        self.position_embeddings = nn.Embedding(
+            config.max_position_embeddings, config.hidden_size
+        )
         # self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -804,11 +854,11 @@ class TransformerNetModel2(nn.Module):
         # config2.hidden_size = 2 * config.hidden_size
         # self.output_transformers = BertEncoder(config)
 
-
-
-        self.output_down_proj = nn.Sequential(nn.Linear(config.hidden_size, config.hidden_size),
-                                              nn.Tanh(), nn.Linear(config.hidden_size, out_channels))
-
+        self.output_down_proj = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.Tanh(),
+            nn.Linear(config.hidden_size, out_channels),
+        )
 
     # def convert_to_fp16(self):
     #     """
@@ -833,6 +883,105 @@ class TransformerNetModel2(nn.Module):
     #     """
     #     return next(self.input_blocks.parameters()).dtype
 
+    def _load_glove_embeddings(self, glove_file_path, vocab_size, vocab_file=None):
+        """
+        Load GloVe embeddings with word-level mapping (same as text_datasets.py).
+        Searches: vocab_file param → vocab/vocab.json
+        Random init for missing words (special tokens, OOV).
+        """
+        import json
+        import os
+
+        import numpy as np
+
+        print(f"Loading GloVe embeddings from {glove_file_path}")
+
+        # Step 1: Load GloVe into word→vector dictionary
+        glove_model = {}
+        with open(glove_file_path, "r") as f:
+            for line in f:
+                values = line.strip().split()
+                word = values[0]
+                vector = th.tensor(np.array(values[1:], dtype=np.float32))
+                glove_model[word] = vector
+
+        embedding_dim = len(next(iter(glove_model.values())))
+
+        if embedding_dim != self.in_channels:
+            raise ValueError(
+                f"GloVe dimension mismatch: GloVe has {embedding_dim} dimensions "
+                f"but model expects {self.in_channels} dimensions. "
+                f"Make sure --in_channel matches your GloVe file."
+            )
+
+        print(f"Loaded {len(glove_model)} GloVe words of dimension {embedding_dim}")
+
+        # Step 2: Find vocab.json using predictable search strategy
+        vocab_dict = None
+        vocab_path = None
+
+        # Priority 1: Explicit vocab_file parameter (recommended)
+        if vocab_file and os.path.exists(vocab_file):
+            vocab_path = vocab_file
+            print(f"Using explicit vocab_file: {vocab_path}")
+
+        # Priority 2: vocab/vocab.json (centralized location)
+        elif os.path.exists("vocab/vocab.json"):
+            vocab_path = "vocab/vocab.json"
+            print(f"Found vocab.json in vocab directory: {vocab_path}")
+
+        # Not found - provide clear error
+        else:
+            raise FileNotFoundError(
+                f"vocab.json not found!\n"
+                f"Searched: {vocab_file or '--vocab_file (not provided)'}, vocab/vocab.json\n"
+                "\n"
+                "Solution: Use --vocab_file to point to vocab.json from emb training run,\n"
+                "or copy it to vocab/vocab.json for automatic discovery.\n"
+            )
+
+        # Load the vocab
+        with open(vocab_path, "r") as f:
+            vocab_dict = json.load(f)
+
+        print(f"Loaded Diffusion-LM vocabulary: {len(vocab_dict)} words")
+
+        # Step 3: Build embedding matrix by looking up each vocab word in GloVe
+        embedding_weights = []
+        oov_count = 0
+
+        # Create list of (word, idx) pairs sorted by idx to ensure correct order
+        vocab_items = sorted(vocab_dict.items(), key=lambda x: x[1])
+
+        for word, idx in vocab_items:
+            if word in glove_model:
+                embedding_weights.append(glove_model[word])
+            else:
+                oov_count += 1
+                # Random initialization for missing words (special tokens, OOV)
+                embedding_weights.append(th.randn(embedding_dim))
+
+        # Stack into embedding matrix
+        embedding_matrix = th.stack(embedding_weights)
+
+        # Verify size matches - fail if mismatch
+        if len(embedding_matrix) != vocab_size:
+            raise ValueError(
+                f"Vocabulary size mismatch: vocab.json has {len(vocab_dict)} words "
+                f"but model expects {vocab_size} words.\n"
+                "This usually means the vocab_size parameter doesn't match the vocabulary.\n"
+                "Make sure you're using the same dataset and checkpoint path."
+            )
+
+        self.word_embedding.weight.data = embedding_matrix
+
+        print(f"✓ Initialized {len(glove_model) - oov_count} words from GloVe")
+        print(
+            f"✓ Randomly initialized {oov_count} words not in GloVe (special tokens + OOV)"
+        )
+        print(f"✓ Final embedding shape: {embedding_matrix.shape}")
+        print("✓ GloVe embeddings are now trainable (requires_grad=True)")
+
     def get_embeds(self, input_ids):
         return self.word_embedding(input_ids)
 
@@ -841,13 +990,19 @@ class TransformerNetModel2(nn.Module):
             return self.lm_head(hidden_repr)
         elif self.logits_mode == 2:
             text_emb = hidden_repr
-            emb_norm = (self.lm_head.weight ** 2).sum(-1).view(-1, 1)  # vocab
-            text_emb_t = th.transpose(text_emb.view(-1, text_emb.size(-1)), 0, 1)  # d, bsz*seqlen
-            arr_norm = (text_emb ** 2).sum(-1).view(-1, 1)  # bsz*seqlen, 1
-            dist = emb_norm + arr_norm.transpose(0, 1) - 2.0 * th.mm(self.lm_head.weight,
-                                                                     text_emb_t)  # (vocab, d) x (d, bsz*seqlen)
-            scores = th.sqrt(th.clamp(dist, 0.0, np.inf)).view(emb_norm.size(0), hidden_repr.size(0),
-                                                               hidden_repr.size(1)) # vocab, bsz*seqlen
+            emb_norm = (self.lm_head.weight**2).sum(-1).view(-1, 1)  # vocab
+            text_emb_t = th.transpose(
+                text_emb.view(-1, text_emb.size(-1)), 0, 1
+            )  # d, bsz*seqlen
+            arr_norm = (text_emb**2).sum(-1).view(-1, 1)  # bsz*seqlen, 1
+            dist = (
+                emb_norm
+                + arr_norm.transpose(0, 1)
+                - 2.0 * th.mm(self.lm_head.weight, text_emb_t)
+            )  # (vocab, d) x (d, bsz*seqlen)
+            scores = th.sqrt(th.clamp(dist, 0.0, np.inf)).view(
+                emb_norm.size(0), hidden_repr.size(0), hidden_repr.size(1)
+            )  # vocab, bsz*seqlen
             scores = -scores.permute(1, 2, 0).contiguous()
 
             #
@@ -862,7 +1017,6 @@ class TransformerNetModel2(nn.Module):
         else:
             raise NotImplementedError
 
-
     def forward(self, x, timesteps, y=None, src_ids=None, src_mask=None):
         """
         Apply the model to an input batch.
@@ -873,9 +1027,9 @@ class TransformerNetModel2(nn.Module):
         :return: an [N x C x ...] Tensor of outputs.
         """
         # print(f'real model inputs: {timesteps}')
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
+        assert (y is not None) == (self.num_classes is not None), (
+            "must specify y if and only if the model is class-conditional"
+        )
 
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
@@ -888,27 +1042,31 @@ class TransformerNetModel2(nn.Module):
             encoder_hidden_states = self.encoder(src_emb).last_hidden_state
             encoder_attention_mask = src_mask.unsqueeze(1).unsqueeze(1)
 
-
-
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
-
         emb_x = self.input_up_proj(x)
         seq_length = x.size(1)
-        position_ids = self.position_ids[:, : seq_length ]
+        position_ids = self.position_ids[:, :seq_length]
         # print(emb_x.shape, emb.shape, self.position_embeddings)
-        emb_inputs = self.position_embeddings(position_ids) + emb_x + emb.unsqueeze(1).expand(-1, seq_length, -1)
+        emb_inputs = (
+            self.position_embeddings(position_ids)
+            + emb_x
+            + emb.unsqueeze(1).expand(-1, seq_length, -1)
+        )
         emb_inputs = self.dropout(self.LayerNorm(emb_inputs))
         if self.conditional_gen:
             # print(emb_inputs.shape, encoder_hidden_states.shape, encoder_attention_mask.shape)
-            input_trans_hidden_states = self.input_transformers(emb_inputs,
-                                                                encoder_hidden_states=encoder_hidden_states,
-                                                                encoder_attention_mask=encoder_attention_mask,
-                                                                ).last_hidden_state
+            input_trans_hidden_states = self.input_transformers(
+                emb_inputs,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+            ).last_hidden_state
         else:
-            input_trans_hidden_states = self.input_transformers(emb_inputs).last_hidden_state
+            input_trans_hidden_states = self.input_transformers(
+                emb_inputs
+            ).last_hidden_state
         h = self.output_down_proj(input_trans_hidden_states)
         h = h.type(x.dtype)
         return h

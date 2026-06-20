@@ -32,7 +32,7 @@ import torch
 import datasets
 import stanza
 import spacy_stanza
-from datasets import load_dataset, load_metric
+from datasets import load_dataset
 
 import transformers
 from transformers import (
@@ -119,9 +119,25 @@ class ModelArguments:
         default='/u/scr/xlisali/diffusion_lm/simple_wiki/data.v1.split/simple.training.txt',
         metadata={"help": "simple wiki path"},
     )
+    wiki_corpus_train: Optional[str] = field(
+        default='datasets/roots_en_wikipedia',
+        metadata={"help": "wikipedia corpus directory containing wiki_train.json"},
+    )
     e2e_train: Optional[str] = field(
         default='/u/scr/xlisali/e2e_data',
         metadata={"help": "simple wiki path"},
+    )
+    diffusion_model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "path to trained diffusion model directory containing vocab.json (used for roc tokenizer loading)"},
+    )
+    use_bert_tokenizer: Optional[str] = field(
+        default='no',
+        metadata={"help": "Use BERT WordPiece tokenizer instead of Spacy (yes/no)"},
+    )
+    use_gpt2_tokenizer: Optional[str] = field(
+        default='no',
+        metadata={"help": "Use GPT2 BPE tokenizer instead of Spacy (yes/no)"},
     )
 
     reduced_emb: Optional[int] = field(
@@ -291,14 +307,32 @@ def get_corpus_rocstory(data_args):
                 sentences = row[2:]
                 for ii in [1, 2, 3]:
                     sent = " ".join([sentences[ii-1], sentences[ii+1], sentences[ii]])
-                    example = [x.text for x in tokenizer(sent)]
+                    example = [x.text for x in tokenizer(sent) if x.text.strip()]
                     sentence_lst.append(example)
         print(sentence_lst[:2])
 
     elif data_args.experiment.startswith('roc') and data_args.task == 'classifier':
         print('loading dataset from ROCStory')
-        nlp = English()
-        tokenizer = nlp.tokenizer
+        use_bert = getattr(data_args, 'use_bert_tokenizer', 'no') == 'yes'
+        use_gpt2 = getattr(data_args, 'use_gpt2_tokenizer', 'no') == 'yes'
+        if use_bert:
+            from transformers import AutoTokenizer
+            bert_tok = AutoTokenizer.from_pretrained('bert-base-uncased')
+            def tokenize_text(text):
+                return bert_tok.tokenize(text.strip())
+            print('Using BERT (bert-base-uncased) WordPiece tokenizer')
+        elif use_gpt2:
+            from transformers import AutoTokenizer
+            gpt2_tok = AutoTokenizer.from_pretrained('gpt2')
+            def tokenize_text(text):
+                return gpt2_tok.tokenize(text.strip())
+            print('Using GPT2 BPE tokenizer')
+        else:
+            nlp = English()
+            tokenizer = nlp.tokenizer
+            def tokenize_text(text):
+                return [x.text for x in tokenizer(text) if x.text.strip()]
+            print('Using Spacy word-level tokenizer')
         sentence_lst = []
         with open(f'{data_args.roc_train}/ROCstory_full.csv', 'r') as csvfile:
             roc_reader = csv.reader(csvfile) #delimiter=' ', quotechar='|')
@@ -306,9 +340,8 @@ def get_corpus_rocstory(data_args):
                 if idx == 0:
                     continue
                 sentences = row[2:]
-                sentences = [[x.text for x in tokenizer(sent)] for sent in sentences]
+                sentences = [tokenize_text(sent) for sent in sentences]
                 for ii in [1, 2, 3]:
-                    # sent = " ".join([sentences[ii-1], sentences[ii+1], sentences[ii]])
                     example = [sentences[ii-1], sentences[ii+1], sentences[ii], 1]
                     sentence_lst.append(example)
         np.random.shuffle(sentence_lst)
@@ -330,19 +363,32 @@ def get_corpus_rocstory(data_args):
 
     elif data_args.experiment.startswith('roc') and data_args.task != 'data_teacher':
         print('loading dataset from ROCStory')
-        nlp = English()
-        tokenizer = nlp.tokenizer
+        use_bert = getattr(data_args, 'use_bert_tokenizer', 'no') == 'yes'
+        use_gpt2 = getattr(data_args, 'use_gpt2_tokenizer', 'no') == 'yes'
+        if use_bert:
+            from transformers import AutoTokenizer
+            bert_tok = AutoTokenizer.from_pretrained('bert-base-uncased')
+            def tokenize_text(text):
+                return bert_tok.tokenize(text.strip())
+            print('Using BERT (bert-base-uncased) WordPiece tokenizer')
+        elif use_gpt2:
+            from transformers import AutoTokenizer
+            gpt2_tok = AutoTokenizer.from_pretrained('gpt2')
+            def tokenize_text(text):
+                return gpt2_tok.tokenize(text.strip())
+            print('Using GPT2 BPE tokenizer')
+        else:
+            nlp = English()
+            spacy_tok = nlp.tokenizer
+            def tokenize_text(text):
+                return [x.text for x in spacy_tok(text) if x.text.strip()]
+            print('Using Spacy word-level tokenizer')
         sentence_lst = []
         with open(f'{data_args.roc_train}/roc_train.json', 'r') as roc_reader:
             for row in roc_reader:
                 sentences = json.loads(row)[0].strip()
-        # with open(data_args.roc_train, 'r') as csvfile:
-        #     roc_reader = csv.reader(csvfile) #delimiter=' ', quotechar='|')
-        #     for row in roc_reader:
-        #         sentences = " ".join(row[2:])
-                word_lst = [x.text for x in tokenizer(sentences)]
+                word_lst = tokenize_text(sentences)
                 sentence_lst.append(word_lst)
-        # sentence_lst = sentence_lst[1:]
         print(sentence_lst[:2])
     elif data_args.experiment.startswith('roc') and data_args.task == 'data_teacher':
         print('loading dataset from ROCStory')
@@ -355,6 +401,35 @@ def get_corpus_rocstory(data_args):
         sentence_lst = sentence_lst[1:]
         print(sentence_lst[:2])
         return sentence_lst, None
+    elif data_args.experiment.startswith('wiki') and data_args.task != 'data_teacher':
+        print('loading dataset from Wikipedia')
+        use_bert = getattr(data_args, 'use_bert_tokenizer', 'no') == 'yes'
+        use_gpt2 = getattr(data_args, 'use_gpt2_tokenizer', 'no') == 'yes'
+        if use_bert:
+            from transformers import AutoTokenizer
+            bert_tok = AutoTokenizer.from_pretrained('bert-base-uncased')
+            def tokenize_text(text):
+                return bert_tok.tokenize(text.strip())
+            print('Using BERT (bert-base-uncased) WordPiece tokenizer')
+        elif use_gpt2:
+            from transformers import AutoTokenizer
+            gpt2_tok = AutoTokenizer.from_pretrained('gpt2')
+            def tokenize_text(text):
+                return gpt2_tok.tokenize(text.strip())
+            print('Using GPT2 BPE tokenizer')
+        else:
+            nlp = English()
+            spacy_tok = nlp.tokenizer
+            def tokenize_text(text):
+                return [x.text for x in spacy_tok(text) if x.text.strip()]
+            print('Using Spacy word-level tokenizer')
+        sentence_lst = []
+        with open(f'{data_args.wiki_corpus_train}/wiki_train.json', 'r') as wiki_reader:
+            for row in wiki_reader:
+                sentences = json.loads(row)[0].strip()
+                word_lst = tokenize_text(sentences)
+                sentence_lst.append(word_lst)
+        print(sentence_lst[:2])
     elif data_args.experiment.startswith('simple-wiki'):
         print('loading dataset from simple wikipedia')
         sentence_lst = []
@@ -393,7 +468,7 @@ def get_corpus_rocstory(data_args):
         with open(path, 'r') as ff:
             for row in ff:
                 word_lst = row.split('||')[1]
-                tokenized = [x.text for x in tokenizer(word_lst)]
+                tokenized = [x.text for x in tokenizer(word_lst) if x.text.strip()]
                 word_lst1 = [x if x in vocab else 'UNK' for x in tokenized]
                 word_lst1 = " ".join(word_lst1)
                 word_lst2 = [vocab.get(x.text, vocab['UNK']) for x in tokenizer(word_lst)]
@@ -414,20 +489,31 @@ def get_corpus_rocstory(data_args):
         with open(path, 'r') as ff:
             for row in ff:
                 word_lst = row.split('||')[1]
-                word_lst = list(reversed([x.text for x in tokenizer(word_lst)]))
+                word_lst = list(reversed([x.text for x in tokenizer(word_lst) if x.text.strip()]))
                 sentence_lst.append(word_lst)
         print(sentence_lst[:2])
 
     elif data_args.experiment.startswith('e2e-tgt'):
         print('loading dataset from simple e2e dataset')
+        use_bert = getattr(data_args, 'use_bert_tokenizer', 'no') == 'yes'
+        if use_bert:
+            from transformers import AutoTokenizer
+            bert_tok = AutoTokenizer.from_pretrained('bert-base-uncased')
+            def tokenize_text(text):
+                return bert_tok.tokenize(text.strip())
+            print('Using BERT (bert-base-uncased) WordPiece tokenizer')
+        else:
+            nlp = English()
+            spacy_tok = nlp.tokenizer
+            def tokenize_text(text):
+                return [x.text for x in spacy_tok(text) if x.text.strip()]
+            print('Using Spacy word-level tokenizer')
         sentence_lst = []
-        nlp = English()
-        tokenizer = nlp.tokenizer
         path = f'{data_args.e2e_train}/src1_train.txt'
         with open(path, 'r') as ff:
             for row in ff:
                 word_lst = row.split('||')[1]
-                word_lst = [x.text for x in tokenizer(word_lst)]
+                word_lst = tokenize_text(word_lst)
                 sentence_lst.append(word_lst)
         print(sentence_lst[:2])
 
@@ -463,10 +549,10 @@ def get_corpus_rocstory(data_args):
                 # src_lst = ordered_fill(src_lst, 'food')
                 # src_lst = ordered_fill(src_lst, 'price')
 
-                word_lst = [x.text for x in tokenizer(word_lst)]
+                word_lst = [x.text for x in tokenizer(word_lst) if x.text.strip()]
                 for mode in ordered_:
                     src_lst3 = ordered_fill(src_lst, mode, full_dict)
-                    src_lst2 = [x.text for x in tokenizer(src_lst3)]
+                    src_lst2 = [x.text for x in tokenizer(src_lst3) if x.text.strip()]
                     sentence_lst.append((word_lst, src_lst2))
                 vocab_lst.append(word_lst)
 
@@ -488,9 +574,9 @@ def get_corpus_rocstory(data_args):
         for input_ids in sentence_lst:
             counter.update(input_ids)
 
-    vocab_dict = {'START': 0, 'END': 1, 'UNK':2, 'PAD':3}
+    vocab_dict = {'PAD': 0}
     for k, v in counter.items():
-        if v > 10:
+        if v >= 1:
             vocab_dict[k] = len(vocab_dict)
     print(len(counter), len(vocab_dict))
 
@@ -585,7 +671,7 @@ def main():
             counter.update(input_ids['pos'])
         print(counter)
         print(dataset)
-        vocab_dict = {'START': 0, 'END': 1}
+        vocab_dict = {}
         for k in counter.keys():
             vocab_dict[k] = len(vocab_dict)
 
@@ -595,16 +681,24 @@ def main():
 
     ###################### LOAD DATASETS & dictionary #########################
     elif model_args.experiment.startswith('roc') or\
+            model_args.experiment.startswith('wiki') or\
             model_args.experiment.startswith('simple-wiki') or \
             model_args.experiment.startswith('e2e-tgt') or \
             model_args.experiment.startswith('e2e-back'):
         train_dataset, vocab = get_corpus_rocstory(model_args) # TODO: include validation sets.
         print(len(vocab), 'derived vocabs')
 
-        if model_args.experiment.startswith('roc'):
-            tokenizer = load_tokenizer('roc', 'random',
-                                       '/u/scr/nlp/xlisali/predictability/diffusion_models_v7/diff_roc_pad_rand16_transformer_lr0.0001_0.0_2000_sqrt_Lsimple_h128_s2_d0.1_sd108_xstart')
-            vocab = {v: k for k, v in tokenizer.items()}
+        if model_args.experiment.startswith('roc') or \
+                model_args.experiment.startswith('wiki') or \
+                (model_args.experiment.startswith('e2e-tgt') and
+                 getattr(model_args, 'diffusion_model_path', None) is not None):
+            assert model_args.diffusion_model_path is not None, \
+                "--diffusion_model_path must point to a trained diffusion model directory containing vocab.json"
+            tokenizer = load_tokenizer(model_args.experiment, 'random', model_args.diffusion_model_path)
+            if isinstance(tokenizer, dict):
+                vocab = {v: k for k, v in tokenizer.items()}
+            else:
+                vocab = tokenizer.get_vocab()
             print(len(tokenizer), len(vocab), 'loaded vocabs')
 
         # train_dataset = train_dataset[:100]
@@ -624,7 +718,7 @@ def main():
         print(raw_datasets)
 
         if model_args.experiment in ['e2e-tgt-pos', 'e2e-tgt-gen-pos']:
-            pos_vocab = {'START': 0, 'END': 1, 'UNK': 2, 'PAD': 3}
+            pos_vocab = {'PAD': 0}
             pos_lst = ['ADJ', 'ADV', 'INTJ', 'NOUN', 'PROPN', 'VERB',
                        'ADP', 'AUX', 'CCONJ', 'DET', 'NUM', 'PART', 'PRON', 'SCONJ',
                        'PUNCT', 'SYM', 'X']
@@ -635,6 +729,10 @@ def main():
             parser = benepar.Parser("benepar_en3")
             tree_vocab = parser._parser.config["label_vocab"]
 
+        if 'PAD' not in vocab and '[PAD]' in vocab:
+            vocab['PAD'] = vocab['[PAD]']
+        elif 'PAD' not in vocab and '<|endoftext|>' in vocab:
+            vocab['PAD'] = vocab['<|endoftext|>']
         raw_datasets.vocab = vocab
         raw_datasets['validation'] = raw_datasets['test']
 
@@ -724,6 +822,7 @@ def main():
     ############# LOAD TOKENIZER ##############
     if model_args.experiment.startswith('synth') or \
             model_args.experiment.startswith('pos') or model_args.experiment.startswith('roc') or \
+            model_args.experiment.startswith('wiki') or \
             model_args.experiment.startswith('simple-wiki') or \
             model_args.experiment.startswith('e2e-tgt') or\
             model_args.experiment.startswith('e2e-back'):
@@ -933,7 +1032,7 @@ def main():
 
 
 
-        elif model_args.experiment in ['pos', 'synth', 'roc', 'simple-wiki', 'e2e-tgt']:
+        elif model_args.experiment in ['pos', 'synth', 'roc', 'wiki', 'simple-wiki', 'e2e-tgt']:
 
             if model_args.task == 'ar_for_cont':
                 import torch
@@ -1059,8 +1158,8 @@ def main():
                     init_idx = init_idx+len_temp
 
                 if model_args.experiment == 'e2e-tgt-pos':
-                    input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for seq in examples['text']]
-                    pos_tags = [[0] + [pos_vocab[x] for x in seq] + [1] for seq in pos_lst]
+                    input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for seq in examples['text']]
+                    pos_tags = [[pos_vocab[x] for x in seq] for seq in pos_lst]
                     print(pos_tags)
                     result_dict = {'input_ids': input_ids, 'pos_tags':pos_tags}
                 elif model_args.experiment == 'e2e-tgt-gen-pos':
@@ -1069,8 +1168,8 @@ def main():
                                          for (pos_, seq) in zip(pos_lst, examples['text'])]
                         return tokenizer(input_strings, max_length=128, padding='max_length', truncation=True)
                     elif model_args.task == 'from_scratch':
-                        input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for seq in examples['text']]
-                        pos_tags = [[0] + [pos_vocab[x] for x in seq] + [1] for seq in pos_lst]
+                        input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for seq in examples['text']]
+                        pos_tags = [[pos_vocab[x] for x in seq] for seq in pos_lst]
                         result_dict = {'input_ids': input_ids, 'pos_tags': pos_tags}
 
             # clm input could be much much longer than block_size
@@ -1124,8 +1223,8 @@ def main():
                     return tokenizer(input_strings, max_length=128, padding='max_length', truncation=True)
                 elif model_args.task == 'from_scratch':
                     raise NotImplementedError
-                    input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for seq in examples['text']]
-                    pos_tags = [[0] + [pos_vocab[x] for x in seq] + [1] for seq in pos_lst]
+                    input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for seq in examples['text']]
+                    pos_tags = [[pos_vocab[x] for x in seq] for seq in pos_lst]
                     result_dict = {'input_ids': input_ids, 'pos_tags': pos_tags}
 
             # clm input could be much much longer than block_size
@@ -1186,7 +1285,7 @@ def main():
                     for x in parse_lst:
                         chart = chart_from_tree(tree_vocab, x)
                         chart_lst.append(chart)
-                    input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for seq in examples['text']]
+                    input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for seq in examples['text']]
                     result_dict = {'input_ids': input_ids, 'chart_lst':chart_lst}
                 elif model_args.experiment == 'e2e-tgt-gen-tree':
                     parse_lst = [remove_leaves(tree) for tree in parse_lst]
@@ -1197,7 +1296,7 @@ def main():
                         return tokenizer(input_strings, max_length=256, padding='max_length', truncation=True)
                     elif model_args.task == 'from_scratch':
                         raise NotImplementedError
-                        input_ids = [tree + [0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for (tree, seq) in
+                        input_ids = [tree + [vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for (tree, seq) in
                                      zip(parse_lst, examples['text'])]
                 elif model_args.experiment == 'e2e-tgt-gen-spans':
                     if model_args.task == 'finetune':
@@ -1213,7 +1312,7 @@ def main():
                         for parse, seq in zip(parse_lst, examples['text']):
                             chart, spans = chart_from_tree(tree_vocab, parse, verbose=True)
                             for (a, b, c) in spans:
-                                input_ids = [vocab_dict.get(x, vocab_dict['UNK']) for x in f"{a} {b} {c}".split()] + [0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1]
+                                input_ids = [vocab_dict.get(x, vocab_dict['PAD']) for x in f"{a} {b} {c}".split()] + [vocab_dict.get(x, vocab_dict['PAD']) for x in seq]
                                 input_lst.append(input_ids)
                         print(len(input_lst), len(parse_lst))
                         print(input_lst[0])
@@ -1264,24 +1363,31 @@ def main():
             )
 
     elif (model_args.experiment.startswith('roc') or\
+            model_args.experiment.startswith('wiki') or\
             model_args.experiment.startswith('simple-wiki') or \
             model_args.experiment.startswith('e2e-tgt')) and model_args.task not in ['data_teacher', 'finetune']:
         def tokenize_function(examples):
             vocab_dict = raw_datasets.vocab
             with CaptureLogger(tok_logger) as cl:
                 if model_args.task == 'classifier':
+                    if isinstance(vocab_dict, dict):
+                        input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq1 + seq2 + seqmid] for (seq1, seq2, seqmid) in
+                                     zip(examples['left_text'], examples['right_text'], examples['mid_text'])]
+                    else:
+                        input_ids = [[vocab_dict.convert_tokens_to_ids(x) for x in seq1 + seq2 + seqmid] for (seq1, seq2, seqmid) in
+                                     zip(examples['left_text'], examples['right_text'], examples['mid_text'])]
 
-                    input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq1 + seq2 + seqmid] + [1] for (seq1, seq2, seqmid) in
-                                 zip(examples['left_text'], examples['right_text'], examples['mid_text'])]
-
-                    type_ids = [[0] + [0] * (len(seq1)+len(seq2)) + [1] * len(seqmid) + [1] for
+                    type_ids = [[0] * (len(seq1)+len(seq2)) + [1] * len(seqmid) for
                                  (seq1, seq2, seqmid) in
                                  zip(examples['left_text'], examples['right_text'], examples['mid_text'])]
 
                     labels = examples['label']
                     result_dict = {'input_ids': input_ids, 'type_ids':type_ids, 'labels':labels}
                 else:
-                    input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for seq in examples['text']]
+                    if isinstance(vocab_dict, dict):
+                        input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for seq in examples['text']]
+                    else:
+                        input_ids = [[vocab_dict.convert_tokens_to_ids(x) for x in seq] for seq in examples['text']]
                     result_dict = {'input_ids': input_ids}
             # clm input could be much much longer than block_size
             if "Token indices sequence length is longer than the" in cl.out:
@@ -1327,17 +1433,18 @@ def main():
         else:
             def pad_function(group_lst):
                 vocab_dict = raw_datasets.vocab
+                pad_id = vocab_dict['PAD'] if isinstance(vocab_dict, dict) else vocab_dict.pad_token_id
 
                 max_length = 64
                 seqlen = 64
                 if model_args.task == 'classifier':
-                    group_lst['input_ids'] = _collate_batch_helper(group_lst['input_ids'], vocab_dict['PAD'],
+                    group_lst['input_ids'] = _collate_batch_helper(group_lst['input_ids'], pad_id,
                                                                    max_length)
                     group_lst['type_ids'] = _collate_batch_helper(group_lst['type_ids'], 2,
                                                                    max_length)
                     group_lst["labels"] = group_lst["labels"]
                 else:
-                    group_lst['input_ids'] = _collate_batch_helper(group_lst['input_ids'], vocab_dict['PAD'], max_length)
+                    group_lst['input_ids'] = _collate_batch_helper(group_lst['input_ids'], pad_id, max_length)
                     group_lst["labels"] = group_lst["input_ids"].copy()
 
                 return group_lst
@@ -1356,8 +1463,8 @@ def main():
             vocab_dict = raw_datasets.vocab
             with CaptureLogger(tok_logger) as cl:
                 if model_args.experiment == 'e2e-back':
-                    input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for (seq, _) in examples['text']]
-                    src_ids = [ [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for (_, seq) in examples['text']]
+                    input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for (seq, _) in examples['text']]
+                    src_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for (_, seq) in examples['text']]
                     result_dict = {'word_ids': input_ids, 'src_ids':src_ids}
                 elif model_args.experiment == 'e2e-back-gen':
                     input_strings = [
@@ -1432,7 +1539,7 @@ def main():
     elif model_args.experiment.startswith('pos'):
         def tokenize_function(examples):
             with CaptureLogger(tok_logger) as cl:
-                input_ids = [[0] + [raw_datasets.vocab[x] for x in seq]+ [1] for seq in examples['pos']]
+                input_ids = [[raw_datasets.vocab[x] for x in seq] for seq in examples['pos']]
                 # input_ids = [0] + input_ids + [1]
                 result_dict = {'input_ids': input_ids}
             # clm input could be much much longer than block_size
@@ -1476,6 +1583,7 @@ def main():
             )
 
     elif (model_args.experiment.startswith('roc') or\
+            model_args.experiment.startswith('wiki') or\
             model_args.experiment.startswith('simple-wiki') or \
             model_args.experiment.startswith('e2e-tgt')) and model_args.task in ['data_teacher', 'finetune']:
         print(tokenizer.bos_token, tokenizer.eos_token, tokenizer.pad_token)
@@ -1612,17 +1720,14 @@ def main():
             else:
                 return logits.argmax(dim=-1)
 
-        metric = load_metric("accuracy")
-
         def compute_metrics(eval_preds):
             preds, labels = eval_preds
-            # preds have the same shape as the labels, after the argmax(-1) has been calculated
-            # by preprocess_logits_for_metrics but we need to shift the labels
             labels = labels[:, 1:].reshape(-1)
             preds = preds[:, :-1].reshape(-1)
-            return metric.compute(predictions=preds, references=labels)
+            import numpy as np
+            return {"accuracy": float((np.array(preds) == np.array(labels)).mean())}
 
-    trainer_tokenizer = None if ((model_args.experiment in ['pos', 'synth', 'roc', 'simple-wiki', 'e2e-tgt',
+    trainer_tokenizer = None if ((model_args.experiment in ['pos', 'synth', 'roc', 'wiki', 'simple-wiki', 'e2e-tgt',
                                                             'e2e-tgt-pos','e2e-tgt-tree', 'e2e-back', 'e2e-back_t2']
                                  or model_args.experiment in ['synth_emb', 'pos_emb', 'roc_emb', 'simple-wiki_emb', 'e2e-tgt_emb'])
                                  and model_args.task not in ['data_teacher', 'finetune']) \

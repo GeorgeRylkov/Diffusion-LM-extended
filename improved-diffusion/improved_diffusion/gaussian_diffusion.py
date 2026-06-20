@@ -69,6 +69,16 @@ def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
         return np.concatenate(
             [first_part, second_part]
         )
+    elif schedule_name == 'tan_d':
+        d = 2
+        def alpha_bar_fn(t):
+            if t >= 1.0:
+                return 0.0
+            return 1.0 / (1.0 + math.tan(t * math.pi / 2) ** 2 * d ** 2)
+        return betas_for_alpha_bar(
+            num_diffusion_timesteps,
+            alpha_bar_fn,
+        )
     else:
         raise NotImplementedError(f"unknown beta schedule: {schedule_name}")
 

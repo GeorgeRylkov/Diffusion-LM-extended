@@ -3,7 +3,9 @@
 from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, default_data_collator, PreTrainedTokenizerFast, \
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
+from transformers import AutoModelForCausalLM, AutoConfig, default_data_collator, PreTrainedTokenizerFast, \
     PreTrainedTokenizer
 from datasets import load_dataset
 import sys, os
@@ -13,6 +15,8 @@ import torch
 from collections import Counter, defaultdict
 from functools import partial
 from itertools import chain
+
+from improved_diffusion.hf_tokenizer_util import auto_tokenizer_from_pretrained
 
 
 def load_data_text(
@@ -46,6 +50,10 @@ def load_data_text(
         training_data, model = get_corpus_rocstory(data_args, model, image_size,
                                             padding_mode=padding_mode, split=split,
                                             load_vocab=load_vocab)
+    elif task_mode == 'wiki':
+        training_data, model = get_corpus_rocstory(data_args, model, image_size,
+                                            padding_mode=padding_mode, split=split,
+                                            load_vocab=load_vocab)
     elif task_mode == 'simple-wiki':
         training_data, model = get_corpus_rocstory(data_args, model, image_size,
                                             padding_mode=padding_mode, split=split,
@@ -56,6 +64,7 @@ def load_data_text(
         training_data, model = get_corpus_rocstory(data_args, model, image_size,
                                             padding_mode=padding_mode, split=split,
                                             load_vocab=load_vocab)
+                                            
     elif task_mode == 'yelp':
         print('hello loading yelp ')
         training_data, model = get_corpus_rocstory(data_args, model, image_size,
@@ -74,11 +83,11 @@ def load_data_text(
                                             load_vocab=load_vocab)
 
     elif task_mode == 'book':
-        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        tokenizer = auto_tokenizer_from_pretrained('bert-base-uncased')
         training_data, model = get_corpus_book(data_args, tokenizer, model, image_size,
                                               padding_mode=padding_mode, split=split,)
 
-    if data_args.modality in ['roc-aug', 'roc', 'book', 'yelp', 'commonGen', 'commonGen-aug'] and data_args.cache_mode=='no':
+    if data_args.modality in ['roc-aug', 'roc', 'wiki', 'book', 'yelp', 'commonGen', 'commonGen-aug'] and data_args.cache_mode=='no':
         dataset = TextDataset_NoCache(
             training_data,
             image_size,
@@ -94,8 +103,27 @@ def load_data_text(
             model_arch=data_args.model_arch,
         )
 
-    if deterministic:
+    use_dist = (
+        dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+    )
 
+    if use_dist:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=not deterministic,
+            drop_last=True,
+        )
+        data_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            drop_last=True,
+            num_workers=1,
+        )
+    elif deterministic:
+        sampler = None
         data_loader = DataLoader(
             dataset,
             batch_size=batch_size,  # 20,
@@ -105,6 +133,7 @@ def load_data_text(
         )
 
     else:
+        sampler = None
         data_loader = DataLoader(
             dataset,
             batch_size=batch_size,  # 20,
@@ -112,18 +141,21 @@ def load_data_text(
             shuffle=True,
             num_workers=1,
         )
+    epoch = 0
     while True:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
         yield from data_loader
+        epoch += 1
 
 def helper_tokenize_encode_cond(sentence_lst, vocab_dict, model, seqlen, data_args):
     result_train_lst = []
     group_lst = defaultdict(list)
     with torch.no_grad():
         for (src_ids, input_ids) in sentence_lst:
-            tokenized_ = [vocab_dict.get(x, vocab_dict['UNK']) for x in input_ids]
-            tokenized_src = [vocab_dict.get(x, vocab_dict['UNK']) for x in src_ids]
-            input_ids = [0] + tokenized_ + [1]
-            group_lst['word_ids'].append(input_ids)
+            tokenized_ = [vocab_dict.get(x, vocab_dict['PAD']) for x in input_ids]
+            tokenized_src = [vocab_dict.get(x, vocab_dict['PAD']) for x in src_ids]
+            group_lst['word_ids'].append(tokenized_)
             group_lst['src_ids'].append(tokenized_src)
 
         print(group_lst['word_ids'][:2])
@@ -168,12 +200,10 @@ def helper_tokenize_stream(sentence_lst, vocab_dict, model, seqlen, data_args, p
 
     def tokenize_function(examples):
         if isinstance(vocab_dict, dict):
-            input_ids = [[0] + [vocab_dict.get(x, vocab_dict['UNK']) for x in seq] + [1] for seq in examples['text']]
+            input_ids = [[vocab_dict.get(x, vocab_dict['PAD']) for x in seq] for seq in examples['text']]
         elif isinstance(vocab_dict, PreTrainedTokenizerFast):
-            examples['text'] = [" ".join(seq) for seq in examples['text']]
-            input_ids = vocab_dict(examples['text'], add_special_tokens=True)['input_ids']
+            input_ids = [vocab_dict.convert_tokens_to_ids(seq) for seq in examples['text']]
         result_dict = {'input_ids': input_ids}
-        # clm input could be much much longer than block_size
         return result_dict
 
     tokenized_datasets = raw_datasets.map(
@@ -242,9 +272,11 @@ def helper_tokenize_encode(sentence_lst, vocab_dict, model, seqlen, data_args, p
     group_lst = defaultdict(list)
     with torch.no_grad():
         for input_ids in sentence_lst:
-            tokenized_ = [vocab_dict.get(x, vocab_dict['UNK']) for x in input_ids]
-            input_ids = [0] + tokenized_ + [1]
-            group_lst['word_ids'].append(input_ids)
+            if isinstance(vocab_dict, dict):
+                tokenized_ = [vocab_dict.get(x, vocab_dict['PAD']) for x in input_ids]
+            elif isinstance(vocab_dict, PreTrainedTokenizerFast):
+                tokenized_ = vocab_dict.convert_tokens_to_ids(input_ids)
+            group_lst['word_ids'].append(tokenized_)
         print(group_lst['word_ids'][:2])
 
         if padding_mode == 'block':
@@ -261,7 +293,11 @@ def helper_tokenize_encode(sentence_lst, vocab_dict, model, seqlen, data_args, p
         elif padding_mode == 'pad':
             print('padding mode is pad')
             max_length = seqlen
-            group_lst['word_ids'] = _collate_batch_helper(group_lst['word_ids'], vocab_dict['PAD'], max_length)
+            if isinstance(vocab_dict, dict):
+                pad_token = vocab_dict['PAD']
+            else:
+                pad_token = vocab_dict.pad_token_id
+            group_lst['word_ids'] = _collate_batch_helper(group_lst['word_ids'], pad_token, max_length)
 
         for input_ids in group_lst['word_ids']:
             if data_args.experiment.startswith('random'):
@@ -273,51 +309,347 @@ def helper_tokenize_encode(sentence_lst, vocab_dict, model, seqlen, data_args, p
                 hidden_state = hidden_state * data_args.emb_scale_factor
             elif data_args.experiment == 'glove':
                 hidden_state = model(torch.tensor(input_ids))
+            elif data_args.experiment == 'bert':
+                hidden_state = model(torch.tensor(input_ids))
             result_train_lst.append({'input_ids': input_ids, 'hidden_states': hidden_state.cpu().tolist()})
 
     return result_train_lst
 
-def load_glove_model(File):
-    print("Loading Glove Model")
+def load_glove_model(file_path):
+    print("Loading embedding model from", file_path)
     glove_model = {}
-    with open(File,'r') as f:
+    with open(file_path,'r') as f:
         for line in f:
             split_line = line.split()
             word = split_line[0]
             embedding = torch.tensor(np.array(split_line[1:], dtype=np.float64))
-            # embedding = np.array(split_line[1:], dtype=np.float64)
             glove_model[word] = embedding
     print(f"{len(glove_model)} words loaded!")
     return glove_model
 
-def load_glove(vocab):
-    model = torch.nn.Embedding(len(vocab), 50)
-    glove_model = load_glove_model('predictability/glove/glove.6B.50d.txt')
-    array_lst = []
-    count_ = 0
+def _collect_corpus_ids(sentence_lst, tokens_to_ids):
+    """Gather token IDs for every token occurrence in the corpus."""
+    all_ids = []
+    for sent in sentence_lst:
+        if isinstance(sent, (list, tuple)) and len(sent) == 2 and isinstance(sent[0], list):
+            tokens = sent[1]
+        else:
+            tokens = sent
+        ids = tokens_to_ids(tokens)
+        if isinstance(ids, torch.Tensor):
+            all_ids.append(ids)
+        else:
+            all_ids.append(torch.tensor(ids, dtype=torch.long))
+    return torch.cat(all_ids)
+
+
+def normalize_embeddings(embedding_weights, sentence_lst, tokens_to_ids):
+    """Z-score normalize an embedding matrix using full-corpus statistics.
+
+    Collects every token occurrence from sentence_lst (frequency-weighted),
+    computes per-dimension mean and std, then normalizes the full vocabulary.
+
+    Args:
+        embedding_weights: tensor of shape (vocab_size, emb_dim).
+        sentence_lst: list of token sequences (strings).
+        tokens_to_ids: callable mapping a list of token strings to a list of int IDs.
+
+    Returns:
+        (normalized_weights, corpus_ids) where corpus_ids can be used for
+        corpus-weighted norm computation.
+    """
+    corpus_ids = _collect_corpus_ids(sentence_lst, tokens_to_ids)
+    corpus_embs = embedding_weights[corpus_ids]
+    print(f"Computing z-score stats over {len(corpus_ids):,} corpus tokens")
+    print(f"Pre-normalization vocab mean norm: "
+          f"{torch.norm(embedding_weights, dim=-1).mean():.4f}")
+    print(f"Pre-normalization corpus mean norm: "
+          f"{torch.norm(corpus_embs, dim=-1).mean():.4f}")
+
+    src_mean = corpus_embs.mean(dim=0)
+    src_std = corpus_embs.std(dim=0).clamp(min=1e-6)
+    print(f"Per-dim mean (avg): {src_mean.mean():.6f}, std (avg): {src_std.mean():.6f}")
+
+    normalized = (embedding_weights - src_mean) / src_std
+    print(f"Post-z-score vocab mean norm: "
+          f"{torch.norm(normalized, dim=-1).mean():.4f}")
+    print(f"Post-z-score corpus mean norm: "
+          f"{torch.norm(normalized[corpus_ids], dim=-1).mean():.4f}")
+    return normalized, corpus_ids
+
+
+def load_glove(vocab, glove_file_path, sentence_lst):
+    """Load pre-trained GloVe/FastText embeddings, z-score normalize, and rescale.
+
+    Reads a GloVe-format text file (word vec0 vec1 ... vecN per line).
+    Z-score normalizes using full corpus stats, rescales to TARGET_CORPUS_NORM.
+    PAD is explicitly set to the zero vector after normalization.
+    """
+    EMB_DIM = 128
+    TARGET_CORPUS_NORM = 4.055
+    glove_model = load_glove_model(file_path=glove_file_path)
+
+    embedding_weights = []
+    oov_words = []
     for word, idx in vocab.items():
         if word in glove_model:
-            array_lst.append(glove_model[word])
+            embedding_weights.append(glove_model[word])
+        elif word == "PAD":
+            embedding_weights.append(torch.randn(EMB_DIM))
         else:
-            count_ += 1
-            array_lst.append(torch.randn(50))
-    print(f'{count_} out of {len(vocab)} is initialized. ')
-    array_lst = torch.stack(array_lst)
-    print(torch.norm(array_lst, dim=-1).mean())
-    model.weight.data = array_lst
+            embedding_weights.append(torch.randn(EMB_DIM))
+            oov_words.append(word)
+
+    if oov_words:
+        print(f"WARNING: {len(oov_words)} unexpected OOV words: {oov_words[:20]}")
+    else:
+        print(f"All {len(vocab) - 1} non-PAD vocab words found in embedding file.")
+
+    embedding_weights = torch.stack(embedding_weights).float()
+
+    def tokens_to_ids(tokens):
+        return [vocab[w] for w in tokens if w in vocab]
+
+    embedding_weights, corpus_ids = normalize_embeddings(
+        embedding_weights, sentence_lst, tokens_to_ids)
+
+    corpus_norm = torch.norm(embedding_weights[corpus_ids], dim=-1).mean().item()
+    scale = TARGET_CORPUS_NORM / corpus_norm
+    embedding_weights = embedding_weights * scale
+    print(f"Rescaled to target corpus norm {TARGET_CORPUS_NORM:.3f} (scale={scale:.4f})")
+    print(f"Final corpus-weighted mean norm: "
+          f"{torch.norm(embedding_weights[corpus_ids], dim=-1).mean():.4f}")
+    print(f"Final vocab-wide mean norm: "
+          f"{torch.norm(embedding_weights, dim=-1).mean():.4f}")
+
+    embedding_weights[vocab["PAD"]] = torch.zeros(EMB_DIM)
+    print(f"PAD norm: {torch.norm(embedding_weights[vocab['PAD']]):.4f}")
+
+    model = torch.nn.Embedding(len(vocab), EMB_DIM)
+    model.weight.data = embedding_weights
     return model
 
+
+BERT_TARGET_CORPUS_NORMS = {
+    'roc': 4.055,      # from BERT e2e model (ema 400k, ROCStories)
+    'e2e-tgt': 7.364,  # from BERT e2e model (ema 200k, E2E-tgt)
+    'wiki': 4.1161,     # from BERT e2e model (ema 150003, Wikipedia)
+}
+
+def load_bert_embeddings(vocab_dict, sentence_lst, modality):
+    """Load frozen BERT-tiny (128d) embeddings, z-score normalize, and rescale.
+
+    Extracts the word_embeddings matrix from prajjwal1/bert-tiny (128d),
+    z-score normalizes using full-corpus stats, then rescales so the
+    corpus-weighted mean L2 norm matches the e2e reference for the given modality.
+    """
+    from transformers import BertModel
+
+    BERT_MODEL = os.path.expanduser(
+        '~/.cache/huggingface/hub/models--prajjwal1--bert-tiny/'
+        'snapshots/6f75de8b60a9f8a2fdf7b69cbd86d9e64bcb3837')
+    EMB_DIM = 128
+    assert modality in BERT_TARGET_CORPUS_NORMS, \
+        f"No BERT target corpus norm for modality '{modality}'. " \
+        f"Known: {list(BERT_TARGET_CORPUS_NORMS)}"
+    TARGET_CORPUS_NORM = BERT_TARGET_CORPUS_NORMS[modality]
+    print(f"Using TARGET_CORPUS_NORM={TARGET_CORPUS_NORM:.3f} for modality='{modality}'")
+    vocab_size = len(vocab_dict)
+
+    print(f"Loading BERT embeddings from {BERT_MODEL}")
+    bert = BertModel.from_pretrained(BERT_MODEL)
+    pretrained_weights = bert.embeddings.word_embeddings.weight.data.clone()
+    del bert
+    print(f"Extracted embedding matrix: {pretrained_weights.shape}")
+
+    assert pretrained_weights.shape[1] == EMB_DIM, \
+        f"Expected dim={EMB_DIM} but got {pretrained_weights.shape[1]}"
+    assert pretrained_weights.shape[0] >= vocab_size, \
+        f"BERT has {pretrained_weights.shape[0]} rows but vocab_size={vocab_size}"
+    pretrained_weights = pretrained_weights[:vocab_size].float()
+
+    pad_id = vocab_dict.pad_token_id
+    print(f"PAD token: '{vocab_dict.pad_token}' at index {pad_id}")
+
+    embedding_weights, corpus_ids = normalize_embeddings(
+        pretrained_weights, sentence_lst, vocab_dict.convert_tokens_to_ids)
+
+    corpus_norm = torch.norm(embedding_weights[corpus_ids], dim=-1).mean().item()
+    scale = TARGET_CORPUS_NORM / corpus_norm
+    embedding_weights = embedding_weights * scale
+    print(f"Rescaled to target corpus norm {TARGET_CORPUS_NORM:.3f} (scale={scale:.4f})")
+    print(f"Final corpus-weighted mean norm: "
+          f"{torch.norm(embedding_weights[corpus_ids], dim=-1).mean():.4f}")
+    print(f"Final vocab-wide mean norm: "
+          f"{torch.norm(embedding_weights, dim=-1).mean():.4f}")
+    print(f"PAD norm: {torch.norm(embedding_weights[pad_id]):.4f}")
+
+    model = torch.nn.Embedding(vocab_size, EMB_DIM)
+    model.weight.data = embedding_weights
+    return model
+
+GPT2_TARGET_CORPUS_NORMS = {
+    'roc': 4.138,  # from GPT2 e2e model (ema 400k, ROCStories)
+}
+
+def load_gpt2_pca_embeddings(vocab_dict, sentence_lst, gpt2_pca_path, modality):
+    """Load frozen PCA-projected GPT2 embeddings, z-score normalize, and rescale.
+
+    Reads a pre-computed (vocab_size, 128) embedding matrix from gpt2_pca_path,
+    z-score normalizes using full-corpus stats, then rescales so the
+    corpus-weighted mean L2 norm matches the e2e reference for the given modality.
+    """
+    EMB_DIM = 128
+    assert modality in GPT2_TARGET_CORPUS_NORMS, \
+        f"No GPT2 target corpus norm for modality '{modality}'. " \
+        f"Known: {list(GPT2_TARGET_CORPUS_NORMS)}"
+    TARGET_CORPUS_NORM = GPT2_TARGET_CORPUS_NORMS[modality]
+    print(f"Using TARGET_CORPUS_NORM={TARGET_CORPUS_NORM:.3f} for modality='{modality}'")
+    vocab_size = len(vocab_dict)
+
+    emb_file = os.path.join(gpt2_pca_path, 'pca_embeddings.pt')
+    print(f"Loading GPT2 PCA embeddings from {emb_file}")
+    pretrained_weights = torch.load(emb_file, map_location='cpu')
+    print(f"Loaded embedding matrix: {pretrained_weights.shape}")
+
+    assert pretrained_weights.shape[0] >= vocab_size, \
+        f"PCA file has {pretrained_weights.shape[0]} rows but vocab_size={vocab_size}"
+    assert pretrained_weights.shape[1] == EMB_DIM, \
+        f"PCA file has dim={pretrained_weights.shape[1]} but expected {EMB_DIM}"
+    pretrained_weights = pretrained_weights[:vocab_size].float()
+
+    pad_id = vocab_dict.pad_token_id
+    print(f"PAD token: '{vocab_dict.pad_token}' at index {pad_id}")
+
+    embedding_weights, corpus_ids = normalize_embeddings(
+        pretrained_weights, sentence_lst, vocab_dict.convert_tokens_to_ids)
+
+    corpus_norm = torch.norm(embedding_weights[corpus_ids], dim=-1).mean().item()
+    scale = TARGET_CORPUS_NORM / corpus_norm
+    embedding_weights = embedding_weights * scale
+    print(f"Rescaled to target corpus norm {TARGET_CORPUS_NORM:.3f} (scale={scale:.4f})")
+    print(f"Final corpus-weighted mean norm: "
+          f"{torch.norm(embedding_weights[corpus_ids], dim=-1).mean():.4f}")
+    print(f"Final vocab-wide mean norm: "
+          f"{torch.norm(embedding_weights, dim=-1).mean():.4f}")
+    print(f"PAD norm: {torch.norm(embedding_weights[pad_id]):.4f}")
+
+    model = torch.nn.Embedding(vocab_size, EMB_DIM)
+    model.weight.data = embedding_weights
+    return model
 
 def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                         split='train', load_vocab=None):
     import csv, torch, json
     from spacy.lang.en import English
 
+    use_bert = getattr(data_args, 'use_bert_tokenizer', 'no') == 'yes'
+    use_gpt2 = getattr(data_args, 'use_gpt2_tokenizer', 'no') == 'yes'
+    if use_bert:
+        tok_src = getattr(data_args, 'tokenizer_name_or_path', None) or 'bert-base-uncased'
+        bert_tok = auto_tokenizer_from_pretrained(tok_src)
+        # Diffusion-LM uses BERT only as a tokenizer/vocab, not as a model —
+        # the 512-token positional-embedding limit of bert-base-uncased does
+        # not apply here. Disable the length check so long passages don't
+        # spam "Token indices sequence length is longer than ..." warnings.
+        # Final truncation to seqlen still happens downstream in
+        # _collate_batch_helper (or in tokenize_wiki_corpus.py for the Arrow
+        # fast path).
+        bert_tok.model_max_length = int(1e30)
+        def tokenize_text(text):
+            return bert_tok.tokenize(text.strip())
+        print(f'Using BERT WordPiece tokenizer from {tok_src}')
+    elif use_gpt2:
+        gpt2_tok = auto_tokenizer_from_pretrained('gpt2')
+        gpt2_tok.pad_token = gpt2_tok.eos_token
+        # Same rationale as the BERT branch above: we use the tokenizer for
+        # its vocab only, not the GPT-2 model, so the 1024-token context
+        # limit does not apply. Prevents "Token indices sequence length"
+        # warnings on very long passages.
+        gpt2_tok.model_max_length = int(1e30)
+        def tokenize_text(text):
+            return gpt2_tok.tokenize(text.strip())
+        print('Using GPT2 BPE tokenizer')
+    else:
+        nlp = English()
+        spacy_tok = nlp.tokenizer
+        def tokenize_text(text):
+            return [x.text for x in spacy_tok(text.strip()) if x.text.strip()]
+        print('Using Spacy word-level tokenizer')
+
+    # --- Arrow fast path for wiki ---------------------------------------
+    # When a pre-tokenized dataset directory is provided we skip the JSON +
+    # Python-list + helper_tokenize_stream pipeline entirely. Each DDP rank
+    # will then mmap the same Arrow file instead of duplicating ~100 GB of
+    # Python objects per process. Only supported for:
+    #     modality == 'wiki'
+    #     experiment == 'random'         (no corpus-statistics-based embeddings)
+    #     use_bert_tokenizer == 'yes'    (matches how the dataset was tokenized)
+    # Any other combination falls through to the original path below.
+    wiki_tok_dir = getattr(data_args, "wiki_tokenized_dir", "") or ""
+    if (
+        wiki_tok_dir
+        and data_args.modality == "wiki"
+        and data_args.experiment == "random"
+        and use_bert
+    ):
+        import datasets as hf_datasets
+
+        print(f"[arrow-fastpath] loading pre-tokenized wiki from {wiki_tok_dir}")
+        dsdict = hf_datasets.load_from_disk(wiki_tok_dir)
+
+        info_path = os.path.join(wiki_tok_dir, "tokenizer_info.json")
+        if os.path.exists(info_path):
+            with open(info_path, "r") as f:
+                info = json.load(f)
+            print(f"[arrow-fastpath] tokenizer_info: {info}")
+            expected_seqlen = info.get("seqlen")
+            if expected_seqlen is not None and expected_seqlen != image_size**2:
+                raise ValueError(
+                    f"Pre-tokenized seqlen ({expected_seqlen}) does not match "
+                    f"image_size**2 ({image_size**2}). Re-run tokenize_wiki_corpus.py "
+                    f"with --seqlen {image_size**2}."
+                )
+
+        # Pick the requested split. Training code always reads from key 'train',
+        # so remap a valid-split request into a single-key dict matching the
+        # existing helper_tokenize_stream contract.
+        if split not in dsdict:
+            raise ValueError(
+                f"invalid split for Wiki Arrow dataset: {split!r} "
+                f"(available: {list(dsdict.keys())})"
+            )
+        chosen = dsdict[split]
+
+        # vocab_dict == the HF tokenizer, same as the non-fastpath path for
+        # wiki + use_bert. Persist it to the run's checkpoint dir for
+        # downstream scripts (inference, rounding) that re-load from there.
+        vocab_dict = bert_tok
+        if not os.path.exists(
+            os.path.join(data_args.checkpoint_path, "tokenizer_config.json")
+        ):
+            os.makedirs(data_args.checkpoint_path, exist_ok=True)
+            vocab_dict.save_pretrained(data_args.checkpoint_path)
+
+        # Build / load random embedding, mirroring the logic below for
+        # experiment=='random'.
+        if model is None:
+            model = torch.nn.Embedding(vocab_dict.vocab_size, data_args.in_channel)
+            print("[arrow-fastpath] initializing random embeddings", model)
+            torch.nn.init.normal_(model.weight)
+        path_save = f"{data_args.checkpoint_path}/random_emb.torch"
+        if not os.path.exists(path_save):
+            os.makedirs(data_args.checkpoint_path, exist_ok=True)
+            torch.save(model.state_dict(), path_save)
+            print(f"[arrow-fastpath] saved random encoder to {path_save}")
+
+        lm_datasets = hf_datasets.DatasetDict({"train": chosen})
+        return lm_datasets, model
+    # --- end Arrow fast path --------------------------------------------
+
     if data_args.experiment_mode == 'lm':
         if data_args.modality == 'roc':
             print('loading dataset from ROCStory')
-            nlp = English()
-            tokenizer = nlp.tokenizer
             sentence_lst = []
             print(f'loading from {data_args.roc_train}')
             if split == 'train':
@@ -332,7 +664,7 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
             with open(path, 'r') as roc_reader:
                 for row in roc_reader:
                     sentences = json.loads(row)[0].strip()
-                    word_lst = [x.text for x in tokenizer(sentences)]
+                    word_lst = tokenize_text(sentences)
                     sentence_lst.append(word_lst)
 
             # with open(data_args.roc_train, 'r') as csvfile:
@@ -340,14 +672,30 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
             #     for row in roc_reader:
             #         # tokenize.
             #         sentences = " ".join(row[2:])
-            #         word_lst = [x.text for x in tokenizer(sentences)]
+            #         word_lst = [x.text for x in tokenizer(sentences) if x.text.strip()]
             #         sentence_lst.append(word_lst)
             # sentence_lst = sentence_lst[1:]
             print(sentence_lst[:2])
+        if data_args.modality == 'wiki':
+            print('loading dataset from Wikipedia')
+            sentence_lst = []
+            print(f'loading from {data_args.wiki_corpus_train}')
+            if split == 'train':
+                print('loading from the TRAIN set')
+                path = f'{data_args.wiki_corpus_train}/wiki_train.json'
+            elif split == 'valid':
+                print('loading from the VALID set')
+                path = f'{data_args.wiki_corpus_train}/wiki_valid.json'
+            else:
+                assert False, "invalid split for Wiki dataset"
+            with open(path, 'r') as wiki_reader:
+                for row in wiki_reader:
+                    sentences = json.loads(row)[0].strip()
+                    word_lst = tokenize_text(sentences)
+                    sentence_lst.append(word_lst)
+            print(sentence_lst[:2])
         if data_args.modality == 'roc-aug':
             print('loading dataset from ROCStory')
-            nlp = English()
-            tokenizer = nlp.tokenizer
             sentence_lst = []
             if split == 'train':
                 print('loading form the TRAIN set')
@@ -368,13 +716,13 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                     with open(path, 'r') as roc_reader:
                         for row in roc_reader:
                             sentences = row.strip()
-                            word_lst = [x.text for x in tokenizer(sentences)]
+                            word_lst = tokenize_text(sentences)
                             sentence_lst.append(word_lst)
                 else:
                     with open(path, 'r') as roc_reader:
                         for row in roc_reader:
                             sentences = json.loads(row)[0].strip()
-                            word_lst = [x.text for x in tokenizer(sentences)]
+                            word_lst = tokenize_text(sentences)
                             sentence_lst.append(word_lst)
             print(sentence_lst[:2],sentence_lst[-2:], 'dataset size=',len(sentence_lst))
         elif data_args.modality == 'simple-wiki':
@@ -388,8 +736,6 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
         elif data_args.modality == 'e2e-tgt':
             print('loading dataset from simple e2e dataset')
             sentence_lst = []
-            nlp = English()
-            tokenizer = nlp.tokenizer
             if split == 'train':
                 print('loading form the TRAIN set')
                 path = f'{data_args.e2e_train}/src1_train.txt'
@@ -411,15 +757,13 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                 with open(path, 'r') as ff:
                     for row in ff:
                         word_lst = row.split('||')[1]
-                        word_lst = [x.text for x in tokenizer(word_lst)]
+                        word_lst = tokenize_text(word_lst)
                         sentence_lst.append(word_lst)
             print(sentence_lst[:2])
 
         elif data_args.modality == 'yelp':
             print('loading dataset from simple YelpNLG dataset')
             sentence_lst = []
-            nlp = English()
-            tokenizer = nlp.tokenizer
             if split == 'train':
                 print('loading form the TRAIN set')
                 path = f'{data_args.yelp_train}/yelpnlg-train.csv'
@@ -435,7 +779,7 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                     yelp_reader = csv.reader(csvfile) #delimiter=' ', quotechar='|')
                     for row in yelp_reader:
                         sentences = row[1]
-                        word_lst = [x.text for x in tokenizer(sentences)]
+                        word_lst = tokenize_text(sentences)
                         sentence_lst.append(word_lst)
                 sentence_lst = sentence_lst[1:]
             print(sentence_lst[:2])
@@ -443,8 +787,6 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
         elif data_args.modality == 'commonGen':
             print('loading dataset from simple YelpNLG dataset')
             sentence_lst = []
-            nlp = English()
-            tokenizer = nlp.tokenizer
             if split == 'train':
                 print('loading form the TRAIN set')
                 path = f'{data_args.commonGen_train}/commongen.train.jsonl'
@@ -459,15 +801,13 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                     for line in ff:
                         line = json.loads(line)
                         for sentences in line['scene']:
-                            word_lst = [x.text for x in tokenizer(sentences)]
+                            word_lst = tokenize_text(sentences)
                             sentence_lst.append(word_lst)
             print(sentence_lst[:2])
 
         elif data_args.modality == 'commonGen-aug':
             print('loading dataset from simple YelpNLG dataset')
             sentence_lst = []
-            nlp = English()
-            tokenizer = nlp.tokenizer
             if split == 'train':
                 print('loading form the TRAIN set')
                 path = f'{data_args.commonGen_train}/commongen.train.jsonl'
@@ -487,7 +827,7 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                     for line in ff:
                         line = json.loads(line)
                         for sentences in line['scene']:
-                            word_lst = [x.text for x in tokenizer(sentences)]
+                            word_lst = tokenize_text(sentences)
                             sentence_lst.append(word_lst)
             print(sentence_lst[:2])
             import itertools
@@ -496,7 +836,7 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                     with open(path, 'r') as roc_reader:
                         for row in roc_reader:
                             sentences = row.strip()
-                            word_lst = [x.text for x in tokenizer(sentences)]
+                            word_lst = tokenize_text(sentences)
                             spl = [[]]
                             for x, y in itertools.groupby(word_lst, lambda z: z == '.'):
                                 spl[-1].extend(y)
@@ -506,7 +846,7 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                     with open(path, 'r') as roc_reader:
                         for row in roc_reader:
                             sentences = json.loads(row)[0].strip()
-                            word_lst = [x.text for x in tokenizer(sentences)]
+                            word_lst = tokenize_text(sentences)
                             spl = [[]]
                             for x, y in itertools.groupby(word_lst, lambda z: z == '.'):
                                 spl[-1].extend(y)
@@ -526,19 +866,17 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
         if data_args.modality == 'e2e':
             print('loading dataset from simple e2e dataset')
             sentence_lst = []
-            nlp = English()
-            tokenizer = nlp.tokenizer
             if split == 'train':
                 path = f'{data_args.e2e_train}/src1_train.txt'
                 with open(path, 'r') as ff:
                     for row in ff:
                         src_lst, word_lst = row.split('||')
-                        word_lst = [x.text for x in tokenizer(word_lst)]
-                        src_lst = [x.text for x in tokenizer(src_lst)]
+                        word_lst = tokenize_text(word_lst)
+                        src_lst = tokenize_text(src_lst)
                         sentence_lst.append((src_lst, word_lst))
             elif split == 'valid':
                 path = f'{data_args.e2e_train}/src1_valid.txt'
-                sentence_lst = read_e2e_files(path, data_args, tokenizer)
+                sentence_lst = read_e2e_files(path, data_args, tokenize_text)
             print(sentence_lst[:2])
         # get tokenizer.
         if load_vocab is None:
@@ -548,16 +886,27 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
                 counter.update(src_ids)
 
     if load_vocab is None:
-        vocab_dict = {'START': 0, 'END': 1, 'UNK':2, 'PAD':3}
-        for k, v in counter.items():
-            if v > 10:
-                vocab_dict[k] = len(vocab_dict)
-        print(len(counter), len(vocab_dict))
+        if use_bert:
+            vocab_dict = bert_tok
+            path_save_vocab = f'{data_args.checkpoint_path}/vocab.json'
+            print(f'save the BERT tokenizer to {data_args.checkpoint_path}')
+            vocab_dict.save_pretrained(data_args.checkpoint_path)
+        elif use_gpt2:
+            vocab_dict = gpt2_tok
+            path_save_vocab = f'{data_args.checkpoint_path}/vocab.json'
+            print(f'save the GPT2 tokenizer to {data_args.checkpoint_path}')
+            vocab_dict.save_pretrained(data_args.checkpoint_path)
+        else:
+            vocab_dict = {'PAD': 0}
+            for k, v in counter.items():
+                if v >= 1:
+                    vocab_dict[k] = len(vocab_dict)
+            print(len(counter), len(vocab_dict))
 
-        path_save_vocab = f'{data_args.checkpoint_path}/vocab.json'
-        print(f'save the vocab to {path_save_vocab}')
-        with open(path_save_vocab, 'w') as f:
-            json.dump(vocab_dict, f)
+            path_save_vocab = f'{data_args.checkpoint_path}/vocab.json'
+            print(f'save the vocab to {path_save_vocab}')
+            with open(path_save_vocab, 'w') as f:
+                json.dump(vocab_dict, f)
     else:
         vocab_dict = load_vocab
         path_save_vocab = f'{data_args.checkpoint_path}/vocab.json'
@@ -566,7 +915,6 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
             if isinstance(vocab_dict, dict):
                 with open(path_save_vocab, 'w') as f:
                     json.dump(vocab_dict, f)
-                assert vocab_dict['START'] == 0
             elif isinstance(vocab_dict, PreTrainedTokenizerFast):
                 vocab_dict.save_pretrained(data_args.checkpoint_path)
             else:
@@ -584,18 +932,61 @@ def get_corpus_rocstory(data_args, model, image_size, padding_mode='block',
     elif data_args.experiment == 'gpt2_pre_compress':
         assert model is not None
     elif data_args.experiment == 'glove':
-        assert data_args.in_channel == 50
-        model = load_glove(vocab_dict)
+        assert data_args.in_channel == 128
+        assert data_args.glove_file_path is not None, "GloVe file path is required for glove experiment"
         path_save = f'{data_args.checkpoint_path}/random_emb.torch'
-        print(f'save the random encoder to {data_args.checkpoint_path}/random_emb.torch')
-        torch.save(model.state_dict(), path_save)
+        if os.path.exists(path_save):
+            print(f'Loading pre-normalized GloVe embeddings from {path_save}')
+            model = torch.nn.Embedding(len(vocab_dict), data_args.in_channel)
+            model.load_state_dict(torch.load(path_save))
+        else:
+            model = load_glove(vocab_dict, glove_file_path=data_args.glove_file_path,
+                               sentence_lst=sentence_lst)
+            print(f'save the GloVe encoder to {path_save}')
+            torch.save(model.state_dict(), path_save)
+    elif data_args.experiment == 'bert':
+        assert data_args.in_channel in (128, 768), \
+            "BERT frozen embeddings require in_channel=128 (tiny) or 768 (base)"
+        assert getattr(data_args, 'use_bert_tokenizer', 'no') == 'yes', \
+            "experiment='bert' requires --use_bert_tokenizer yes"
+        path_save = f'{data_args.checkpoint_path}/random_emb.torch'
+        if os.path.exists(path_save):
+            print(f'Loading pre-normalized BERT embeddings from {path_save}')
+            model = torch.nn.Embedding(len(vocab_dict), data_args.in_channel)
+            model.load_state_dict(torch.load(path_save))
+        else:
+            assert data_args.in_channel == 128, (
+                "Initializing BERT frozen embeddings from Hugging Face is only implemented for "
+                "bert-tiny (128d); for 768d, place random_emb.torch in the checkpoint directory."
+            )
+            model = load_bert_embeddings(vocab_dict, sentence_lst=sentence_lst,
+                                         modality=data_args.modality)
+            print(f'save the BERT encoder to {path_save}')
+            torch.save(model.state_dict(), path_save)
+    elif data_args.experiment == 'gpt2_pca':
+        assert data_args.in_channel == 128, "GPT2 PCA embeddings require in_channel=128"
+        assert getattr(data_args, 'use_gpt2_tokenizer', 'no') == 'yes', \
+            "experiment='gpt2_pca' requires --use_gpt2_tokenizer yes"
+        path_save = f'{data_args.checkpoint_path}/random_emb.torch'
+        if os.path.exists(path_save):
+            print(f'Loading pre-normalized GPT2 PCA embeddings from {path_save}')
+            model = torch.nn.Embedding(len(vocab_dict), data_args.in_channel)
+            model.load_state_dict(torch.load(path_save))
+        else:
+            gpt2_pca_path = getattr(data_args, 'gpt2_pca_path', '')
+            assert gpt2_pca_path, "experiment='gpt2_pca' requires --gpt2_pca_path"
+            model = load_gpt2_pca_embeddings(vocab_dict, sentence_lst=sentence_lst,
+                                              gpt2_pca_path=gpt2_pca_path,
+                                              modality=data_args.modality)
+            print(f'save the GPT2 PCA encoder to {path_save}')
+            torch.save(model.state_dict(), path_save)
 
     path_save = f'{data_args.checkpoint_path}/random_emb.torch'
     if not os.path.exists(path_save) and data_args.experiment == 'random':
         torch.save(model.state_dict(), path_save)
 
 
-    if data_args.experiment_mode == 'lm' and data_args.modality in ['roc-aug', 'roc', 'yelp', 'commonGen', 'commonGen-aug'] \
+    if data_args.experiment_mode == 'lm' and data_args.modality in ['roc-aug', 'roc', 'wiki', 'yelp', 'commonGen', 'commonGen-aug'] \
             and data_args.cache_mode=='no':
         train_dataset = helper_tokenize_stream(sentence_lst, vocab_dict, model, image_size**2, data_args, padding_mode)
         return train_dataset, model
@@ -622,13 +1013,13 @@ def write_e2e_src(prompt_lst, corr_path):
     return
 
 
-def read_e2e_files(path, args, tokenizer):
+def read_e2e_files(path, args, tokenize_fn):
     file_dict = {}
     with open(path, 'r') as f:
         for line in f:
             src_lst, word_lst = line.strip().split('||')
-            tgt = tuple([x.text for x in tokenizer(word_lst)])
-            src = tuple([x.text for x in tokenizer(src_lst)])
+            tgt = tuple(tokenize_fn(word_lst))
+            src = tuple(tokenize_fn(src_lst))
             if src not in file_dict:
                 file_dict[src] = []
             file_dict[src].append(tgt)
@@ -840,7 +1231,7 @@ class TextDataset_NoCache(Dataset):
         with torch.no_grad():
             input_ids = self.text_datasets['train'][idx]['input_ids']
             model = self.model_emb
-            if self.data_args.experiment.startswith('random'):
+            if self.data_args.experiment.startswith('random') or self.data_args.experiment in ('glove', 'bert', 'gpt2_pca'):
                 hidden_state = model(torch.tensor(input_ids))
             elif self.data_args.experiment == 'gpt2_pre_compress':
                 input_ids2 = torch.tensor(input_ids).to(model.device)

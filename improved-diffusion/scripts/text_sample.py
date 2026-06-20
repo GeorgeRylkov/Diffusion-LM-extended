@@ -188,12 +188,24 @@ def main():
         cands = th.topk(logits, k=1, dim=-1)
         sample = cands.indices
         tokenizer = load_tokenizer(args.modality, args.experiment, os.path.split(args.model_path)[0])
+        if args.log_token_ids:
+            id_log = open(args.log_token_ids, 'w')
         for seq in cands.indices:
+            ids = seq.squeeze(-1).tolist()
             if isinstance(tokenizer, dict):
                 tokens = " ".join([tokenizer[x[0].item()] for x in seq])
             else:
-                tokens = tokenizer.decode(seq.squeeze(-1))
+                tokens = tokenizer.decode(ids)
             word_lst_e2e.append(tokens)
+            if args.log_token_ids:
+                if isinstance(tokenizer, dict):
+                    tok_strs = [tokenizer.get(i, f'UNK_{i}') for i in ids]
+                else:
+                    tok_strs = tokenizer.convert_ids_to_tokens(ids)
+                print(json.dumps({"ids": ids, "tokens": tok_strs, "text": tokens}), file=id_log)
+        if args.log_token_ids:
+            id_log.close()
+            print(f'written token IDs log to {args.log_token_ids}')
 
     if args.class_cond:
         label_arr = np.concatenate(all_labels, axis=0)
@@ -258,7 +270,8 @@ def create_argparser():
         model_path="",
         model_arch='conv-unet',
         verbose='yes',
-        out_dir="diffusion_lm/improved_diffusion/out_gen"
+        out_dir="diffusion_lm/improved_diffusion/out_gen",
+        log_token_ids='',
     )
     text_defaults = dict(modality='text',
                          dataset_name='wikitext',

@@ -1,14 +1,27 @@
-import os, sys, glob
-# full_lst = glob.glob('diff_models_synth128*')
-# full_lst = glob.glob('diff_models_synth32*')
-# full_lst = glob.glob('diff_models_synth32_3_rand16*')
-# full_lst = glob.glob('diff_models_synth_rand_16_trans_lr_1e-5_long_Lsimple')
-full_lst = glob.glob(sys.argv[1])
-top_p = -1.0 if len(sys.argv) < 2 else sys.argv[2]
+import os, glob, json, argparse, random
+
+parser = argparse.ArgumentParser()
+parser.add_argument('model_glob', type=str, help='Glob pattern for model directories')
+parser.add_argument('--top_p', type=float, default=-1.0)
+parser.add_argument('--pattern', type=str, default='model', help='Checkpoint filename pattern')
+parser.add_argument('--num_samples', type=int, default=50, help='Number of samples to generate')
+parser.add_argument('--gen_refs', action='store_true',
+                    help='After decode/PPL, sample reference lines from --ref_file for downstream MAUVE')
+parser.add_argument('--ref_file', type=str, default='datasets/ROCstory/roc_valid.json',
+                    help='Path to reference dataset (JSON, one story per line)')
+parser.add_argument('--ref_out', type=str, default=None,
+                    help='Where to write --gen_refs output (default: <out_dir>/roc_references.txt)')
+parser.add_argument('--n_refs', type=int, default=1000,
+                    help='Number of reference texts to sample')
+parser.add_argument('--ref_seed', type=int, default=42, help='Seed for reference sampling')
+parser.add_argument('--out_dir', type=str, default='generation_outputs')
+bd_args = parser.parse_args()
+
+full_lst = glob.glob(bd_args.model_glob)
+top_p = bd_args.top_p
 print(f'top_p = {top_p}')
-pattern_ = 'model' if len(sys.argv) < 3 else sys.argv[3]
-print(f'pattern_ = {pattern_}', sys.argv[3])
-# print(full_lst)
+pattern_ = bd_args.pattern
+print(f'pattern_ = {pattern_}')
 
 output_lst = []
 for lst in full_lst:
@@ -38,10 +51,12 @@ for lst in full_lst:
         modality = 'image'
     elif 'roc' in lst:
         modality = 'roc'
-    elif 'e2e-tgt' in lst:
-        modality = 'e2e-tgt'
     elif 'simple-wiki' in lst:
         modality = 'simple-wiki'
+    elif 'wiki' in lst:
+        modality = 'wiki'
+    elif 'e2e-tgt' in lst:
+        modality = 'e2e-tgt'
     elif 'book' in lst:
         modality = 'book'
     elif 'yelp' in lst:
@@ -84,11 +99,11 @@ for lst in full_lst:
 
     # out_dir = 'diffusion_lm/improved_diffusion/out_gen_v2_nucleus'
 
-    out_dir = 'generation_outputs'
-    num_samples = 50
+    out_dir = bd_args.out_dir
+    num_samples = bd_args.num_samples
 
     if modality == 'e2e':
-        num_samples = 547
+        num_samples = max(num_samples, 547)
 
     COMMAND = f'python scripts/{mode}_sample.py ' \
     f'--model_path {tgt} --batch_size 50 --num_samples {num_samples} --top_p {top_p} ' \
@@ -105,10 +120,17 @@ for lst in full_lst:
     output_cands = glob.glob(out_path2)
     print(out_path2, output_cands)
     if len(output_cands) > 0:
-        out_path2 = glob.glob(out_path2)[0]
+        out_path2 = output_cands[0]
     else:
-        os.system(COMMAND)
-        out_path2 = glob.glob(out_path2)[0]
+        ret = os.system(COMMAND)
+        if ret != 0:
+            print(f"ERROR: sampling command failed with exit code {ret}, skipping {lst}")
+            continue
+        output_cands = glob.glob(out_path2)
+        if len(output_cands) == 0:
+            print(f"ERROR: no output file found at {out_path2} after sampling, skipping {lst}")
+            continue
+        out_path2 = output_cands[0]
 
     output_lst.append(out_path2)
 
@@ -120,9 +142,31 @@ for lst in full_lst:
         else:
             model_name_path = 'predictability/diff_models/synth_e=15_b=20_m=gpt2_wikitext-103-raw-v1_None'
     elif modality == 'e2e-tgt':
-        model_name_path = "predictability/diff_models/e2e-tgt_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_None"
+        if 'bert_uncased' in lst or 'bert_tiny_frozen' in lst:
+            model_name_path = "../classifier_models/e2e-tgt_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_bert_uncased"
+        else:
+            model_name_path = "../classifier_models/e2e-tgt_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_None"
     elif modality == 'roc':
-        model_name_path = "predictability/diff_models/roc_e=6_b=10_m=gpt2_wikitext-103-raw-v1_101_wp_pad_v1"
+        if 'bert_uncased' in lst or 'bert_tiny_frozen' in lst:
+            model_name_path = "../classifier_models/roc_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_bert_uncased"
+        elif 'bert' in lst or 'rand768' in lst:
+            model_name_path = "../classifier_models/roc_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_bert_v2"
+        elif 'gpt2' in lst:
+            model_name_path = "../classifier_models/roc_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_gpt2"
+        elif 'fasttext' in lst:
+            model_name_path = "../classifier_models/roc_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_fasttext"
+        else:
+            model_name_path = "../classifier_models/roc_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_None"
+    elif modality == 'wiki':
+        if 'bert_uncased' in lst or 'bert_tiny_frozen' in lst:
+            # Single trained classifier for now (partial wiki); use for full-wiki diffusion PPL too.
+            # bert_tiny_frozen runs use bert-base-uncased tokenizer -> same AR head as bert_uncased.
+            model_name_path = (
+                "../classifier_models/"
+                "wiki_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_bert_uncased_wiki_partial"
+            )
+        else:
+            model_name_path = "../classifier_models/wiki_e=15_b=20_m=gpt2_wikitext-103-raw-v1_101_wp_None"
     elif modality == 'e2e':
         COMMAND1 = f"python diffusion_lm/e2e_data/mbr.py {out_path2}"
 
@@ -136,9 +180,13 @@ for lst in full_lst:
     else:
         print('not trained a AR model yet... only look at the output plz.')
         continue
+    if 'bert' in lst and 'rand' not in dim_:
+        experiment_type = 'bert'
+    else:
+        experiment_type = 'random'
     COMMAND = f"python scripts/ppl_under_ar.py " \
               f"--model_path {tgt} " \
-              f"--modality {modality}  --experiment random " \
+              f"--modality {modality}  --experiment {experiment_type} " \
               f"--model_name_or_path {model_name_path} " \
               f"--input_text {out_path2}  --mode eval"
 
@@ -147,3 +195,22 @@ for lst in full_lst:
     os.system(COMMAND)
 print('output lists:')
 print("\n".join(output_lst))
+
+if bd_args.gen_refs:
+    random.seed(bd_args.ref_seed)
+    ref_path = bd_args.ref_file
+    print(f'\nGenerating {bd_args.n_refs} reference texts from {ref_path}')
+    stories = []
+    with open(ref_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                stories.append(json.loads(line)[0])
+    sampled = random.sample(stories, min(bd_args.n_refs, len(stories)))
+    ref_out = bd_args.ref_out or os.path.join(bd_args.out_dir, 'roc_references.txt')
+    with open(ref_out, 'w', encoding='utf-8') as f:
+        for s in sampled:
+            # One record per line for MAUVE (load_texts reads line-by-line).
+            # Wiki passages often contain paragraph breaks (\n) inside the JSON string.
+            f.write(' '.join(s.split()) + '\n')
+    print(f'Written {len(sampled)} reference texts to {ref_out}')

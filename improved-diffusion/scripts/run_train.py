@@ -1,4 +1,3 @@
-import sys
 import os
 import argparse
 
@@ -32,6 +31,9 @@ if __name__ == '__main__':
     parser.add_argument('--submit', type=str, default='no', help='')
     parser.add_argument('--use_big', type=str, default='no', help='')
     parser.add_argument('--app', type=str, default='', help='')
+    parser.add_argument('--glove_file_path', type=str, default='', help='Path to custom GloVe embeddings')
+    parser.add_argument('--vocab_file', type=str, default='', help='Path to vocab.json file (optional, otherwise searches in checkpoint_path)')
+    parser.add_argument('--use_bert_tokenizer', type=str, default='no', help='Use BERT WordPiece tokenizer (yes/no)')
 
 
     args = parser.parse_args()
@@ -61,6 +63,8 @@ if __name__ == '__main__':
         exp_m = 'emb'
     elif args.experiment == 'glove':
         exp_m = 'glo'
+    elif args.experiment == 'bert':
+        exp_m = 'bert'
 
 
     if args.modality == 'synth' or args.modality =='synth_trans':
@@ -71,7 +75,8 @@ if __name__ == '__main__':
 
     elif args.modality == 'roc' or args.modality == 'roc-aug' or args.modality == 'book' \
             or args.modality == 'simple-wiki' or args.modality == 'e2e-tgt' or args.modality == 'e2e'\
-            or args.modality == 'yelp' or args.modality == 'commonGen' or args.modality == 'commonGen-aug':
+            or args.modality == 'yelp' or args.modality == 'commonGen' or args.modality == 'commonGen-aug' \
+            or args.modality == 'wiki':
 
         Model_FILE = f"diff_{args.modality}_{args.padding_mode}_{exp_m}{args.in_channel}_{args.model_arch}_lr{args.lr}_{args.weight_decay}" \
                      f"_{args.diff_steps}_{args.noise_schedule}_{args.loss_type}_h{args.hidden_size}" \
@@ -109,6 +114,15 @@ if __name__ == '__main__':
                   f"--dropout {args.dropout} --in_channel {args.in_channel} --out_channel {args.in_channel} --padding_mode {args.padding_mode} " \
                   f"--experiment {args.experiment}  --lr_anneal_steps {args.lr_anneal_steps} --weight_decay {args.weight_decay} " \
                   f"--num_res_blocks {args.num_res_blocks} "
+    
+    if args.glove_file_path:
+        COMMANDLINE += f"--glove_file_path {args.glove_file_path} "
+    
+    if args.vocab_file:
+        COMMANDLINE += f"--vocab_file {args.vocab_file} "
+
+    if args.use_bert_tokenizer == 'yes':
+        COMMANDLINE += "--use_bert_tokenizer yes "
 
 
     COMMANDLINE += app

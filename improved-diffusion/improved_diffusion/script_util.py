@@ -40,6 +40,9 @@ def model_and_diffusion_defaults():
         vocab_size=66,
         config_name='bert-base-uncased',
         experiment_mode='lm',
+        experiment='random',
+        glove_file_path='predictability/fasttext/fasttext_rocstory_128d.txt',
+        vocab_file=None,  # Optional: explicit path to vocab.json (recommended for e2e)
         logits_mode=1,
     )
 
@@ -72,6 +75,9 @@ def create_model_and_diffusion(
     config_name,
     experiment_mode,
     logits_mode,
+    experiment='random',
+    glove_file_path='predictability/fasttext/fasttext_rocstory_128d.txt',
+    vocab_file=None,
     **kwargs,
 ):
     model = create_model(
@@ -94,6 +100,9 @@ def create_model_and_diffusion(
         config_name=config_name,
         experiment_mode=experiment_mode,
         logits_mode=logits_mode,
+        experiment=experiment,
+        glove_file_path=glove_file_path,
+        vocab_file=vocab_file,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -131,6 +140,9 @@ def create_model(
     config_name='',
     experiment_mode='lm',
     logits_mode=1,
+    experiment='random',
+    glove_file_path='predictability/fasttext/fasttext_rocstory_128d.txt',
+    vocab_file=None,
 ):
     print(f'creating model, based on {model_arch}')
     if model_arch == 'conv-unet':
@@ -270,6 +282,9 @@ def create_model(
             vocab_size=vocab_size,
             experiment_mode=experiment_mode,
             logits_mode=logits_mode,
+            experiment=experiment,
+            glove_file_path=glove_file_path,
+            vocab_file=vocab_file,
         )
     else:
         raise NotImplementedError

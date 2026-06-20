@@ -49,6 +49,7 @@ class TrainLoop:
         gradient_clipping=-1.,
         eval_data=None,
         eval_interval=-1,
+        lr_warmup_steps=0,
     ):
         self.model = model
         self.diffusion = diffusion
@@ -71,6 +72,7 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.lr_warmup_steps = max(0, int(lr_warmup_steps))
         self.gradient_clipping = gradient_clipping
 
         self.step = 0
@@ -320,9 +322,23 @@ class TrainLoop:
         logger.logkv_mean("grad_norm", np.sqrt(sqsum))
 
     def _anneal_lr(self):
+        global_step = self.step + self.resume_step
+
+        # Linear warmup from 0 -> self.lr over the first lr_warmup_steps.
+        # With lr_warmup_steps == 0 this branch is skipped, giving the same
+        # schedule as before.
+        if self.lr_warmup_steps and global_step < self.lr_warmup_steps:
+            lr = self.lr * (global_step + 1) / self.lr_warmup_steps
+            for param_group in self.opt.param_groups:
+                param_group["lr"] = lr
+            return
+
         if not self.lr_anneal_steps:
             return
-        frac_done = (self.step + self.resume_step) / self.lr_anneal_steps
+        # Linear decay, but start counting from the end of warmup so the full
+        # plateau-then-decay shape matches the original when warmup == 0.
+        anneal_span = max(1, self.lr_anneal_steps - self.lr_warmup_steps)
+        frac_done = (global_step - self.lr_warmup_steps) / anneal_span
         lr = self.lr * (1 - frac_done)
         for param_group in self.opt.param_groups:
             param_group["lr"] = lr

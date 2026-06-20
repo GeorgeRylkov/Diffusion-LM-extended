@@ -1,6 +1,8 @@
 import torch
 # bert results
-from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, default_data_collator
+from transformers import AutoModelForCausalLM, AutoConfig, default_data_collator
+
+from improved_diffusion.hf_tokenizer_util import auto_tokenizer_from_pretrained
 import sys, yaml, os
 # print( os.path.join(sys.path[0], '../../transformers/examples/pytorch/language-modeling'))
 # sys.path.insert(0, 'diffusion_lm/transformers/examples/pytorch/language-modeling')
@@ -9,7 +11,7 @@ import sys, yaml, os
 
 def load_models(modality, mode, model_name_or_path, emb_dim, file, extra_args=None):
 
-    if mode in ['random', 'random1', 'random_up_proj', 'glove']:
+    if mode in ['random', 'random1', 'random_up_proj', 'glove', 'bert', 'gpt2_pca']:
         if modality == 'synth':
             print(file, 'deciding what to load::: ')
             if 'synth128' in file:
@@ -30,13 +32,22 @@ def load_models(modality, mode, model_name_or_path, emb_dim, file, extra_args=No
             print(dataset.vocab)
             tokenizer = {v: k for k, v in dataset.vocab.items()}
         else:
-            import json
-            if modality == 'book' or (extra_args is not None and extra_args.use_bert_tokenizer == 'yes'):
-                tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+            import json, os as _os
+            path_save_tokenizer = '{}/vocab.json'.format(file)
+            tokenizer_override = None
+            if extra_args is not None:
+                tokenizer_override = getattr(extra_args, 'tokenizer_name_or_path', None)
+            if modality == 'book' or (extra_args is not None and getattr(extra_args, 'use_bert_tokenizer', 'no') == 'yes') \
+                    or not _os.path.exists(path_save_tokenizer):
+                tokenizer_source = tokenizer_override or (file if _os.path.isdir(file) else 'bert-base-uncased')
+                tokenizer = auto_tokenizer_from_pretrained(tokenizer_source)
                 if 'e2e' in file and modality == 'book':
                     emb_dim = 1
+            elif mode == 'gpt2_pca' or (extra_args is not None and getattr(extra_args, 'use_gpt2_tokenizer', 'no') == 'yes'):
+                tokenizer = auto_tokenizer_from_pretrained(file if _os.path.isdir(file) else 'gpt2')
+                if tokenizer.pad_token_id is None:
+                    tokenizer.pad_token = tokenizer.eos_token
             else:
-                path_save_tokenizer = '{}/vocab.json'.format(file)
                 print(f'loading from {path_save_tokenizer}')
                 with open(path_save_tokenizer, 'r') as f:
                     vocab = json.load(f)
@@ -50,7 +61,7 @@ def load_models(modality, mode, model_name_or_path, emb_dim, file, extra_args=No
 
 
 def load_tokenizer(modality, mode, model_name_or_path):
-    if mode in ['random', 'random_up_proj', 'glove']:
+    if mode in ['random', 'random_up_proj', 'glove', 'bert', 'gpt2_pca']:
         if modality == 'synth':
             print(model_name_or_path, 'deciding what to load::: ')
             if 'synth128' in model_name_or_path:
@@ -65,19 +76,25 @@ def load_tokenizer(modality, mode, model_name_or_path):
             dataset = SynthDataset(args_synth)
             tokenizer = {v: k for k, v in dataset.vocab.items()}
         elif modality =='book':
-            tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+            tokenizer = auto_tokenizer_from_pretrained('bert-base-uncased')
         else:
-            import json
+            import json, os
             path_save_tokenizer = '{}/vocab.json'.format(model_name_or_path)
-            with open(path_save_tokenizer, 'r') as f:
-                vocab = json.load(f)
-            tokenizer = {v: k for k, v in vocab.items()}
+            tokenizer_json = '{}/tokenizer.json'.format(model_name_or_path)
+            if os.path.exists(tokenizer_json):
+                tokenizer = auto_tokenizer_from_pretrained(model_name_or_path)
+            elif os.path.exists(path_save_tokenizer):
+                with open(path_save_tokenizer, 'r') as f:
+                    vocab = json.load(f)
+                tokenizer = {v: k for k, v in vocab.items()}
+            else:
+                tokenizer = auto_tokenizer_from_pretrained(model_name_or_path)
 
     return tokenizer
 
 def rounding_func(mode, text_emb_lst, model, tokenizer, emb_scale_factor=1.0):
     decoded_out_lst = []
-    if mode in ['random', 'random_up_proj', 'glove']:
+    if mode in ['random', 'random_up_proj', 'glove', 'bert', 'gpt2_pca']:
         down_proj_emb = model.weight  # input_embs
         down_proj_emb2 = None
 
@@ -110,7 +127,10 @@ def rounding_func(mode, text_emb_lst, model, tokenizer, emb_scale_factor=1.0):
             # print(indices[0].tolist())
             # for i in range(64):
             #     print([tokenizer[x.item()] for x in indices[:,i]])
-            decoded_out = " ".join([tokenizer[i] for i in indices[0].tolist()])
+            if isinstance(tokenizer, dict):
+                decoded_out = " ".join([tokenizer[i] for i in indices[0].tolist()])
+            else:
+                decoded_out = tokenizer.decode(indices[0].tolist())
             decoded_out_lst.append(decoded_out)
 
     return decoded_out_lst

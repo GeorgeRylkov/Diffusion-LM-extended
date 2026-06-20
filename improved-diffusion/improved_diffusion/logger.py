@@ -367,7 +367,8 @@ class Logger(object):
             if self.comm.rank != 0:
                 d["dummy"] = 1  # so we don't get a warning about empty dict
         # LISA
-        wandb.log({**d})
+        if self.comm is None or self.comm.rank == 0:
+            wandb.log({**d})
         out = d.copy()  # Return the dict for unit testing purposes
         for fmt in self.output_formats:
             if isinstance(fmt, KVWriter):

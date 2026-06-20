@@ -15,8 +15,8 @@ from improved_diffusion.script_util import (
     args_to_dict,
     add_dict_to_argparser,
 )
-from transformers import AutoTokenizer
 from improved_diffusion.train_util import TrainLoop
+from improved_diffusion.hf_tokenizer_util import auto_tokenizer_from_pretrained
 from transformers import set_seed
 from functools import partial
 from improved_diffusion.test_util import get_weights, compute_logp
@@ -26,9 +26,18 @@ import wandb
 
 def main():
     args = create_argparser().parse_args()
-    set_seed(args.seed) 
     dist_util.setup_dist() # DEBUG **
-    logger.configure()
+    # Offset the seed by rank so each DDP worker draws different shuffles /
+    # diffusion timesteps. On 1 GPU rank == 0 → identical seed to before.
+    set_seed(args.seed + dist.get_rank())
+    # On >1 GPU, pass MPI.COMM_WORLD so the logger averages metrics across
+    # ranks (via mpi_weighted_mean) before logging. On 1 GPU comm stays None,
+    # reproducing the original single-process logging behavior bit-for-bit.
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        from mpi4py import MPI
+        logger.configure(comm=MPI.COMM_WORLD)
+    else:
+        logger.configure()
 
 
     logger.log("creating model and diffusion...")
@@ -43,15 +52,18 @@ def main():
     logger.log(f'the parameter count is {pytorch_total_params}')
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
-    logger.log(f'saving the hyperparameters to {args.checkpoint_path}/training_args.json')
-    with open(f'{args.checkpoint_path}/training_args.json', 'w') as f:
-        json.dump(args.__dict__, f, indent=2)
+    # Only rank 0 writes training_args.json and owns the WandB run; other ranks
+    # would otherwise race on the shared filesystem and spawn duplicate runs.
+    if dist.get_rank() == 0:
+        logger.log(f'saving the hyperparameters to {args.checkpoint_path}/training_args.json')
+        with open(f'{args.checkpoint_path}/training_args.json', 'w') as f:
+            json.dump(args.__dict__, f, indent=2)
 
-    wandb.init(
-        project=os.getenv("WANDB_PROJECT", "diffusion_lm"),
-        name=args.checkpoint_path,
-    )
-    wandb.config.update(args.__dict__, allow_val_change=True)
+        wandb.init(
+            project=os.getenv("WANDB_PROJECT", "diffusion_lm"),
+            name=args.checkpoint_path,
+        )
+        wandb.config.update(args.__dict__, allow_val_change=True)
 
     if args.experiment_mode == 'conditional_gen':
         assert args.modality in ['e2e']
@@ -74,7 +86,12 @@ def main():
             rev_tokenizer = {v: k for k, v in tokenizer.items()}
             print(len(rev_tokenizer), 'loading from tokenizer. ')
         elif args.use_bert_tokenizer == 'yes':
-            rev_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+            bert_tok_name = getattr(args, 'tokenizer_name_or_path', '') or 'bert-base-uncased'
+            rev_tokenizer = auto_tokenizer_from_pretrained(bert_tok_name)
+        elif args.use_gpt2_tokenizer == 'yes':
+            rev_tokenizer = auto_tokenizer_from_pretrained('gpt2')
+            if rev_tokenizer.pad_token_id is None:
+                rev_tokenizer.pad_token = rev_tokenizer.eos_token
         else:
             rev_tokenizer = None
 
@@ -106,8 +123,8 @@ def main():
         next(data)
         model2, tokenizer = load_models(args.modality, args.experiment, args.model_name_or_path, args.in_channel,
                                         args.checkpoint_path, extra_args=args)
-        if args.modality == 'book' or args.use_bert_tokenizer == 'yes':
-            rev_tokenizer = tokenizer # BERT tokenizer BPE.
+        if args.modality == 'book' or args.use_bert_tokenizer == 'yes' or args.use_gpt2_tokenizer == 'yes':
+            rev_tokenizer = tokenizer # HF tokenizer object
         else:
             rev_tokenizer = {v: k for k, v in tokenizer.items()}
 
@@ -133,7 +150,7 @@ def main():
                                         args.checkpoint_path, extra_args=args)
         model3 = get_weights(model2, args)
         print(model3, model3.weight.requires_grad)
-        mapping_func = partial(compute_logp, args, model3.cuda())
+        mapping_func = partial(compute_logp, args, model3.to(dist_util.dev()))
         diffusion.mapping_func = mapping_func
         return mapping_func
 
@@ -159,7 +176,8 @@ def main():
         checkpoint_path=args.checkpoint_path,
         gradient_clipping=args.gradient_clipping,
         eval_data=data_valid,
-        eval_interval=args.eval_interval
+        eval_interval=args.eval_interval,
+        lr_warmup_steps=args.lr_warmup_steps,
     ).run_loop()
 
 
@@ -170,6 +188,7 @@ def create_argparser():
         lr=1e-4,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        lr_warmup_steps=0,
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
@@ -192,11 +211,16 @@ def create_argparser():
                          roc_train='diffusion_lm/ROCstory',#'diffusion_lm/ROCstory/ROCstory17.csv',
                          wiki_train='diffusion_lm/simple_wiki/data.v1.split/simple.training.txt',
                          e2e_train='e2e_data',
+                         wiki_corpus_train='datasets/roots_en_wikipedia',
+                         wiki_tokenized_dir='',
                          yelp_train='diffusion_lm/yelpnlg-resources/yelpnlg-corpus',
                          commonGen_train = 'diffusion_lm/common-gen/commongen_data',
                          emb_scale_factor=1.0, noise_level=0.0, cache_mode='no', use_bert_tokenizer='no',
+                         use_gpt2_tokenizer='no', tokenizer_name_or_path='',
+                         gpt2_pca_path='',
                          padding_mode='block',
-                         preprocessing_num_workers=1)
+                         preprocessing_num_workers=1,
+                         glove_file_path='predictability/fasttext/fasttext_rocstory_128d.txt')
     defaults.update(model_and_diffusion_defaults())
     defaults.update(text_defaults)
     parser = argparse.ArgumentParser()
